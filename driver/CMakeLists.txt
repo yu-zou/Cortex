@@ -4,6 +4,9 @@ project(cortex_driver CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 include(FetchContent)
 FetchContent_Declare(
   googletest
@@ -13,23 +16,25 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(googletest)
 
 set(CORTEX_HW_LIB_DIR "" CACHE PATH "Path to hw/ library output directory")
-if(CORTEX_HW_LIB_DIR)
-  find_library(CORTEX_HW_MOCK cortex_hw_mock PATHS ${CORTEX_HW_LIB_DIR} NO_DEFAULT_PATH)
-endif()
 
 add_library(cortex_driver SHARED
   src/smartssd_driver.cc
   src/driver_manager.cc
   src/cortex_driver_exports.cc
 )
+
 target_include_directories(cortex_driver
-  PUBLIC include
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../hw/include
 )
-if(CORTEX_HW_MOCK)
-  target_link_libraries(cortex_driver PRIVATE ${CORTEX_HW_MOCK})
-endif()
+
+target_link_libraries(cortex_driver PRIVATE dl)
+
+set_target_properties(cortex_driver PROPERTIES
+  INSTALL_RPATH "${CORTEX_HW_LIB_DIR}"
+  BUILD_WITH_INSTALL_RPATH TRUE
+)
 
 install(TARGETS cortex_driver LIBRARY DESTINATION lib)
 
