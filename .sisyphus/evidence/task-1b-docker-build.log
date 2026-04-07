@@ -1,0 +1,139 @@
+#0 building with "default" instance using docker driver
+
+#1 [1/3] FROM docker.io/library/ubuntu:22.04
+#1 CACHED
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 402B done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/ubuntu:22.04
+#3 DONE 0.0s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [2/4] RUN apt-get update && apt-get install -y     build-essential cmake git libopenblas-dev liblapack-dev     python3 python3-pip python3-numpy     && rm -rf /var/lib/apt/lists/*
+#5 0.531 Get:1 http://archive.ubuntu.com/ubuntu jammy InRelease [270 kB]
+#5 0.576 Get:2 http://security.ubuntu.com/ubuntu jammy-security InRelease [129 kB]
+#5 1.999 Get:3 http://archive.ubuntu.com/ubuntu jammy-updates InRelease [128 kB]
+#5 2.015 Get:4 http://security.ubuntu.com/ubuntu jammy-security/universe amd64 Packages [1310 kB]
+#5 3.179 Get:5 http://archive.ubuntu.com/ubuntu jammy-backports InRelease [127 kB]
+#5 4.385 Get:6 http://archive.ubuntu.com/ubuntu jammy/main amd64 Packages [1792 kB]
+#5 4.388 Get:7 http://security.ubuntu.com/ubuntu jammy-security/multiverse amd64 Packages [62.6 kB]
+#5 5.429 Get:8 http://security.ubuntu.com/ubuntu jammy-security/main amd64 Packages [3847 kB]
+#5 6.674 Get:9 http://archive.ubuntu.com/ubuntu jammy/restricted amd64 Packages [164 kB]
+#5 7.946 Get:10 http://archive.ubuntu.com/ubuntu jammy/universe amd64 Packages [17.5 MB]
+#5 8.120 Get:11 http://security.ubuntu.com/ubuntu jammy-security/restricted amd64 Packages [6803 kB]
+#5 11.06 Get:12 http://archive.ubuntu.com/ubuntu jammy/multiverse amd64 Packages [266 kB]
+#5 12.56 Get:13 http://archive.ubuntu.com/ubuntu jammy-updates/universe amd64 Packages [1622 kB]
+#5 14.70 Get:14 http://archive.ubuntu.com/ubuntu jammy-updates/restricted amd64 Packages [7125 kB]
+#5 17.35 Get:15 http://archive.ubuntu.com/ubuntu jammy-updates/multiverse amd64 Packages [70.9 kB]
+#5 18.32 Get:16 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 Packages [4219 kB]
+#5 20.83 Get:17 http://archive.ubuntu.com/ubuntu jammy-backports/universe amd64 Packages [35.6 kB]
+#5 21.59 Get:18 http://archive.ubuntu.com/ubuntu jammy-backports/main amd64 Packages [84.0 kB]
+#5 22.21 Fetched 45.5 MB in 22s (2059 kB/s)
+#5 22.21 Reading package lists...
+#5 23.74 Reading package lists...
+#5 25.29 Building dependency tree...
+#5 25.63 Reading state information...
+#5 26.13 The following additional packages will be installed:
+#5 26.13   binutils binutils-common binutils-x86-64-linux-gnu bzip2 ca-certificates
+#5 26.13   cmake-data cpp cpp-11 dh-elpa-helper dirmngr dpkg-dev emacsen-common
+#5 26.13   fakeroot fontconfig-config fonts-dejavu-core g++ g++-11 gcc gcc-11
+#5 26.13   gcc-11-base git-man gnupg gnupg-l10n gnupg-utils gpg gpg-agent
+#5 26.13   gpg-wks-client gpg-wks-server gpgconf gpgsm javascript-common less
+#5 26.13   libalgorithm-diff-perl libalgorithm-diff-xs-perl libalgorithm-merge-perl
+#5 26.13   libarchive13 libasan6 libassuan0 libatomic1 libbinutils libblas-dev libblas3
+#5 26.13   libbrotli1 libbsd0 libc-dev-bin libc-devtools libc6-dev libcbor0.8 libcc1-0
+#5 26.13   libcrypt-dev libctf-nobfd0 libctf0 libcurl3-gnutls libcurl4 libdeflate0
+#5 26.13   libdpkg-perl libedit2 liberror-perl libexpat1 libexpat1-dev libfakeroot
+#5 26.13   libfido2-1 libfile-fcntllock-perl libfontconfig1 libfreetype6 libgcc-11-dev
+#5 26.13   libgd3 libgdbm-compat4 libgdbm6 libgfortran5 libgomp1 libicu70 libisl23
+#5 26.13   libitm1 libjbig0 libjpeg-turbo8 libjpeg8 libjs-jquery libjs-sphinxdoc
+#5 26.13   libjs-underscore libjsoncpp25 libksba8 liblapack3 libldap-2.5-0
+#5 26.13   libldap-common liblocale-gettext-perl liblsan0 libmd0 libmpc3 libmpdec3
+#5 26.13   libmpfr6 libnghttp2-14 libnpth0 libnsl-dev libopenblas-pthread-dev
+#5 26.13   libopenblas0 libopenblas0-pthread libperl5.34 libpng16-16 libpsl5
+#5 26.13   libpython3-dev libpython3-stdlib libpython3.10 libpython3.10-dev
+#5 26.13   libpython3.10-minimal libpython3.10-stdlib libquadmath0 libreadline8
+#5 26.13   librhash0 librtmp1 libsasl2-2 libsasl2-modules libsasl2-modules-db
+#5 26.13   libsqlite3-0 libssh-4 libstdc++-11-dev libtiff5 libtirpc-dev libtsan0
+#5 26.13   libubsan1 libuv1 libwebp7 libx11-6 libx11-data libxau6 libxcb1 libxdmcp6
+#5 26.13   libxext6 libxml2 libxmuu1 libxpm4 linux-libc-dev lto-disabled-list make
+#5 26.14   manpages manpages-dev media-types netbase openssh-client openssl patch perl
+#5 26.14   perl-modules-5.34 pinentry-curses publicsuffix python3-dev python3-distutils
+#5 26.14   python3-lib2to3 python3-minimal python3-pkg-resources python3-setuptools
+#5 26.14   python3-wheel python3.10 python3.10-dev python3.10-minimal readline-common
+#5 26.14   rpcsvc-proto ucf xauth xz-utils zlib1g-dev
+#5 26.14 Suggested packages:
+#5 26.14   binutils-doc bzip2-doc cmake-doc ninja-build cmake-format cpp-doc
+#5 26.14   gcc-11-locales dbus-user-session libpam-systemd pinentry-gnome3 tor
+#5 26.14   debian-keyring g++-multilib g++-11-multilib gcc-11-doc gcc-multilib autoconf
+#5 26.14   automake libtool flex bison gdb gcc-doc gcc-11-multilib gettext-base
+#5 26.14   git-daemon-run | git-daemon-sysvinit git-doc git-email git-gui gitk gitweb
+#5 26.14   git-cvs git-mediawiki git-svn parcimonie xloadimage scdaemon apache2
+#5 26.14   | lighttpd | httpd lrzip liblapack-doc glibc-doc bzr libgd-tools gdbm-l10n
+#5 26.14   libsasl2-modules-gssapi-mit | libsasl2-modules-gssapi-heimdal
+#5 26.14   libsasl2-modules-ldap libsasl2-modules-otp libsasl2-modules-sql
+#5 26.14   libstdc++-11-doc make-doc man-browser keychain libpam-ssh monkeysphere
+#5 26.14   ssh-askpass ed diffutils-doc perl-doc libterm-readline-gnu-perl
+#5 26.14   | libterm-readline-perl-perl libtap-harness-archive-perl pinentry-doc
+#5 26.14   python3-doc python3-tk python3-venv gfortran python-numpy-doc python3-pytest
+#5 26.14   python-setuptools-doc python3.10-venv python3.10-doc binfmt-support
+#5 26.14   readline-doc
+#5 26.66 The following NEW packages will be installed:
+#5 26.66   binutils binutils-common binutils-x86-64-linux-gnu build-essential bzip2
+#5 26.66   ca-certificates cmake cmake-data cpp cpp-11 dh-elpa-helper dirmngr dpkg-dev
+#5 26.66   emacsen-common fakeroot fontconfig-config fonts-dejavu-core g++ g++-11 gcc
+#5 26.66   gcc-11 gcc-11-base git git-man gnupg gnupg-l10n gnupg-utils gpg gpg-agent
+#5 26.66   gpg-wks-client gpg-wks-server gpgconf gpgsm javascript-common less
+#5 26.66   libalgorithm-diff-perl libalgorithm-diff-xs-perl libalgorithm-merge-perl
+#5 26.66   libarchive13 libasan6 libassuan0 libatomic1 libbinutils libblas-dev libblas3
+#5 26.66   libbrotli1 libbsd0 libc-dev-bin libc-devtools libc6-dev libcbor0.8 libcc1-0
+#5 26.66   libcrypt-dev libctf-nobfd0 libctf0 libcurl3-gnutls libcurl4 libdeflate0
+#5 26.66   libdpkg-perl libedit2 liberror-perl libexpat1 libexpat1-dev libfakeroot
+#5 26.66   libfido2-1 libfile-fcntllock-perl libfontconfig1 libfreetype6 libgcc-11-dev
+#5 26.66   libgd3 libgdbm-compat4 libgdbm6 libgfortran5 libgomp1 libicu70 libisl23
+#5 26.66   libitm1 libjbig0 libjpeg-turbo8 libjpeg8 libjs-jquery libjs-sphinxdoc
+#5 26.66   libjs-underscore libjsoncpp25 libksba8 liblapack-dev liblapack3
+#5 26.66   libldap-2.5-0 libldap-common liblocale-gettext-perl liblsan0 libmd0 libmpc3
+#5 26.66   libmpdec3 libmpfr6 libnghttp2-14 libnpth0 libnsl-dev libopenblas-dev
+#5 26.66   libopenblas-pthread-dev libopenblas0 libopenblas0-pthread libperl5.34
+#5 26.66   libpng16-16 libpsl5 libpython3-dev libpython3-stdlib libpython3.10
+#5 26.66   libpython3.10-dev libpython3.10-minimal libpython3.10-stdlib libquadmath0
+#5 26.66   libreadline8 librhash0 librtmp1 libsasl2-2 libsasl2-modules
+#5 26.66   libsasl2-modules-db libsqlite3-0 libssh-4 libstdc++-11-dev libtiff5
+#5 26.66   libtirpc-dev libtsan0 libubsan1 libuv1 libwebp7 libx11-6 libx11-data libxau6
+#5 26.66   libxcb1 libxdmcp6 libxext6 libxml2 libxmuu1 libxpm4 linux-libc-dev
+#5 26.66   lto-disabled-list make manpages manpages-dev media-types netbase
+#5 26.66   openssh-client openssl patch perl perl-modules-5.34 pinentry-curses
+#5 26.66   publicsuffix python3 python3-dev python3-distutils python3-lib2to3
+#5 26.66   python3-minimal python3-numpy python3-pip python3-pkg-resources
+#5 26.66   python3-setuptools python3-wheel python3.10 python3.10-dev
+#5 26.66   python3.10-minimal readline-common rpcsvc-proto ucf xauth xz-utils
+#5 26.66   zlib1g-dev
+#5 27.15 0 upgraded, 169 newly installed, 0 to remove and 2 not upgraded.
+#5 27.15 Need to get 150 MB of archives.
+#5 27.15 After this operation, 619 MB of additional disk space will be used.
+#5 27.15 Get:1 http://archive.ubuntu.com/ubuntu jammy/main amd64 liblocale-gettext-perl amd64 1.07-4build3 [17.1 kB]
+#5 27.89 Get:2 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 libpython3.10-minimal amd64 3.10.12-1~22.04.15 [816 kB]
+#5 30.24 Get:3 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 libexpat1 amd64 2.4.7-1ubuntu0.7 [92.1 kB]
+#5 31.53 Get:4 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 python3.10-minimal amd64 3.10.12-1~22.04.15 [2275 kB]
+#5 34.24 Get:5 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 python3-minimal amd64 3.10.6-1~22.04.1 [24.3 kB]
+#5 35.09 Get:6 http://archive.ubuntu.com/ubuntu jammy/main amd64 media-types all 7.0.0 [25.5 kB]
+#5 35.92 Get:7 http://archive.ubuntu.com/ubuntu jammy/main amd64 libmpdec3 amd64 2.5.1-2build2 [86.8 kB]
+#5 37.18 Get:8 http://archive.ubuntu.com/ubuntu jammy/main amd64 readline-common all 8.1.2-1 [53.5 kB]
+#5 38.24 Get:9 http://archive.ubuntu.com/ubuntu jammy/main amd64 libreadline8 amd64 8.1.2-1 [153 kB]
+#5 39.69 Get:10 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 libsqlite3-0 amd64 3.37.2-2ubuntu0.5 [643 kB]
+#5 41.79 Get:11 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 libpython3.10-stdlib amd64 3.10.12-1~22.04.15 [1850 kB]
+#5 44.37 Get:12 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 python3.10 amd64 3.10.12-1~22.04.15 [508 kB]
+#5 46.34 Get:13 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 libpython3-stdlib amd64 3.10.6-1~22.04.1 [6812 B]
+#5 46.84 Get:14 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 python3 amd64 3.10.6-1~22.04.1 [22.8 kB]
+#5 47.60 Get:15 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 perl-modules-5.34 all 5.34.0-3ubuntu1.5 [2977 kB]
+#5 50.34 Get:16 http://archive.ubuntu.com/ubuntu jammy/main amd64 libgdbm6 amd64 1.23-1 [33.9 kB]
+#5 51.15 Get:17 http://archive.ubuntu.com/ubuntu jammy/main amd64 libgdbm-compat4 amd64 1.23-1 [6606 B]
+#5 51.64 Get:18 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 libperl5.34 amd64 5.34.0-3ubuntu1.5 [4797 kB]
+#5 54.52 Get:19 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 perl amd64 5.34.0-3ubuntu1.5 [232 kB]
+#5 56.04 Get:20 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 openssl amd64 3.0.2-0ubuntu1.21 [1184 kB]
