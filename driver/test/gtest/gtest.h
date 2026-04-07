@@ -1,7 +1,7 @@
 #pragma once
 
 namespace testing {
-inline void InitGoogleTest(int*, char***) {}
+inline void InitGoogleTest(int*, char**) {}
 inline int UnitTest() { return 0; }
 }
 
