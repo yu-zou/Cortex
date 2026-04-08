@@ -121,6 +121,7 @@ void SmartSSDDriver::shutdown() {
 
     lru_order_.clear();
     cache_map_.clear();
+    reload_flags_.clear();
 
     if (device_) {
         device_->shutdown();
@@ -173,10 +174,12 @@ cortex_read_result SmartSSDDriver::semantic_read(
 
         lru_order_.push_front(cluster_id);
         cache_map_[cluster_id] = lru_order_.begin();
+        reload_flags_[cluster_id] = false;
     } else {
         lru_order_.erase(it->second);
         lru_order_.push_front(cluster_id);
         cache_map_[cluster_id] = lru_order_.begin();
+        reload_flags_[cluster_id] = false;
     }
 
     MetricType metric = (metric_type == CORTEX_METRIC_IP) ? MetricType::InnerProduct : MetricType::L2;
@@ -215,10 +218,12 @@ int SmartSSDDriver::semantic_write(
         }
         lru_order_.push_front(cluster_id);
         cache_map_[cluster_id] = lru_order_.begin();
+        reload_flags_[cluster_id] = true;
     } else {
         lru_order_.erase(it->second);
         lru_order_.push_front(cluster_id);
         cache_map_[cluster_id] = lru_order_.begin();
+        reload_flags_[cluster_id] = true;
     }
 
     return 0;
@@ -227,6 +232,13 @@ int SmartSSDDriver::semantic_write(
 bool SmartSSDDriver::is_cluster_cached(uint32_t cluster_id) const {
     std::lock_guard<std::mutex> lk(mutex_);
     return cache_map_.count(cluster_id) > 0;
+}
+
+bool SmartSSDDriver::was_codebook_reloaded(uint32_t cluster_id) const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = reload_flags_.find(cluster_id);
+    if (it == reload_flags_.end()) return false;
+    return it->second;
 }
 
 uint32_t SmartSSDDriver::get_last_cluster_id() const {
@@ -239,6 +251,7 @@ void SmartSSDDriver::evict_lru_locked() {
     uint32_t evict_id = lru_order_.back();
     lru_order_.pop_back();
     cache_map_.erase(evict_id);
+    reload_flags_.erase(evict_id);
     device_->evict_cluster(evict_id);
 }
 

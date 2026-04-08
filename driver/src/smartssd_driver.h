@@ -1,11 +1,11 @@
 #pragma once
 #include "cortex_driver_api.h"
 #include "smartssd_device.h"
-#include <mutex>
-#include <unordered_map>
+#include <cstdint>
 #include <list>
 #include <memory>
-#include <cstdint>
+#include <mutex>
+#include <unordered_map>
 
 namespace cortex {
 
@@ -27,12 +27,14 @@ public:
         const void* pq_payload, uint64_t payload_size, uint32_t vector_count);
 
     bool is_cluster_cached(uint32_t cluster_id) const;
+    bool was_codebook_reloaded(uint32_t cluster_id) const;
     uint32_t get_last_cluster_id() const;
 
 private:
     struct CacheSlot {
         uint32_t cluster_id;
         uint64_t last_access;
+        bool reload_codebook = false;
     };
 
     // LRU eviction — must be called with mutex held
@@ -45,6 +47,7 @@ private:
     // LRU: front = most recent, back = least recent
     std::list<uint32_t> lru_order_;
     std::unordered_map<uint32_t, std::list<uint32_t>::iterator> cache_map_;
+    std::unordered_map<uint32_t, bool> reload_flags_;
     uint32_t max_cache_slots_ = 64;
     uint32_t last_cluster_id_ = 0;
     bool initialized_ = false;
