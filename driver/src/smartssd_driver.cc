@@ -206,6 +206,8 @@ int SmartSSDDriver::semantic_write(
 {
     std::lock_guard<std::mutex> lk(mutex_);
 
+    if (vector_count == 0 || codebook_size == 0) return 0;
+
     if (!initialized_) return -EINVAL;
 
     int rc = device_->load_cluster(cluster_id, codebook, codebook_size, pq_payload, payload_size, vector_count);

@@ -1,0 +1,6 @@
+sys/build.u2204/dev/
+sys/build.u2204/out/
+sys/build.u2204/vstart_environment.sh
+sys/build.u2204/*.log
+sys/build.u2204/.rgw*
+sys/build.u2204/run/
