@@ -277,6 +277,5 @@ The `sys/` directory is a git submodule pointing to `yu-zou/ceph.git`. Changes t
 - **Real FPGA SmartSSD device**: Implement `hw/src/fpga_smartssd.cc` targeting the Samsung SmartSSD P4 hardware interface; replace the mock library with `libcortex_hw_fpga.so`.
 - **Integration test automation**: Automate `ceph_test_cortex_integration` in CI using an ephemeral `vstart.sh` cluster.
 - **OSD-side async optimization**: Replace the current synchronous `store->read()` call in `SEMANTIC_READ` with an asynchronous BlueStore callback.
-- **Multi-device load balancing**: Extend `DriverManager` to manage a pool of FPGA devices instead of a single instance.
 - **Performance benchmarking suite**: Develop a standardized latency and throughput benchmark comparing NDP-based search against host-CPU ADC search.
 - **Production deployment guide**: Provide Kubernetes/Rook-Ceph deployment manifests and a SmartSSD device plugin.
