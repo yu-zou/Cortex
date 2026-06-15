@@ -4,7 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <vector>
-#include "../src/acc_top.h"
+#include "../include/acc_top.h"
 
 using namespace std;
 
