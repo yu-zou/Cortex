@@ -46,7 +46,7 @@ Client Request
 ### hw/ — SmartSSD Device Layer
 The hardware layer defines an abstract `SmartSSDDevice` interface (in `smartssd_device.h`) with methods for lifecycle management and search operations: `init()`, `shutdown()`, `load_cluster()`, `search()`, `is_cluster_loaded()`, and `evict_cluster()`.
 
-The current implementation, `MockSmartSSD`, performs manual IVFPQ ADC search. It processes a specialized object format: `ClusterHeader` (magic `0x43505100`, version `1`) followed by codebook floats and PQ uint8 codes. This layer builds as `libcortex_hw_mock.so`.
+The current implementation, `MockSmartSSD`, performs manual IVFPQ ADC search. It processes IVF cluster binary data: a 64-byte header (M, DIM, N as little-endian uint32) followed by a codebook (M × ksub × dsub floats) and PQ-encoded vector entries (M code bytes + 8B doc_addr + 8B doc_length per vector). This layer builds as `libcortex_hw_mock.so`.
 
 ### driver/ — Host Driver
 The driver layer implements the `SmartSSDDriver` class, which handles the runtime loading of the hardware library via `dlopen()`. It includes an LRU cluster cache to avoid redundant hardware loads of the same vector clusters.
@@ -70,9 +70,13 @@ The interface between the storage system and the driver is defined by a fixed-si
 #define CORTEX_METRIC_L2    0
 #define CORTEX_METRIC_IP    1
 
-struct cortex_topk_entry { 
-    uint64_t vector_id; 
-    float distance; 
+/* Top-K result entry — matches FPGA 128-bit output:
+ *   dist(FP32,32b) + doc_addr(64b) + doc_length(32b) + pad(32b) */
+struct cortex_topk_entry {
+    float distance;
+    uint64_t doc_addr;     /* document start address in object storage */
+    uint32_t doc_length;   /* document byte length */
+    uint32_t _pad;         /* padding to 128-bit */
 };
 
 struct cortex_read_result {
@@ -87,11 +91,15 @@ void     cortex_driver_shutdown(void);
 
 struct cortex_read_result cortex_semantic_read(
     uint32_t cluster_id, const void* object_data, uint64_t object_size,
-    const float* query_vec, uint32_t query_dim, uint32_t top_k, uint32_t metric_type);
+    const float* query_vec, uint32_t query_dim, uint32_t top_k,
+    uint32_t metric_type, uint32_t search_mode);
 
 int cortex_semantic_write(
     uint32_t cluster_id, const void* codebook, uint64_t codebook_size,
     const void* pq_payload, uint64_t payload_size, uint32_t vector_count);
+
+int      cortex_is_cluster_cached(uint32_t cluster_id);
+uint32_t cortex_get_last_cluster_id(void);
 ```
 
 ## Directory Structure
@@ -116,7 +124,7 @@ Cortex/
 │   │   ├── smartssd_driver.h/.cc    # SmartSSDDriver: dlopen + LRU cache
 │   │   ├── driver_manager.cc        # Thread-safe singleton DriverManager
 │   │   └── cortex_driver_exports.cc # C ABI exports
-│   └── test/                        # Driver unit tests (12 tests)
+│   └── test/                        # Driver unit tests (5 tests)
 ├── sys/                             # Ceph fork (git submodule → yu-zou/ceph)
 │   └── src/cortex/
 │       ├── rgw/                     # RGW semantic search (Eigen3 + async scatter)
@@ -191,19 +199,47 @@ bash scripts/build.sh
 ## Testing
 
 ### hw/ Unit Tests
-- `test_device_interface`: Verifies `SmartSSDDevice` polymorphism and interface compliance.
-- `test_mock_device`: Validates manual IVFPQ ADC search results against a Python-generated golden reference with an epsilon of `1e-4`.
 
-### driver/ Unit Tests
-The driver suite consists of 12 tests covering the ABI contract, dynamic loading, and cache management.
+9 CTest targets (100% pass, no Vitis HLS required):
+
+| Test | What It Verifies |
+|---|---|
+| `test_mock_device` (7 subtests) | MockSmartSSD ADC search vs golden, TopK order, cache, concurrency |
+| `test_device_interface` | SmartSSDDevice polymorphism compliance |
+| `test_dm_header` | IVFHeader 64B DRAM byte parsing |
+| `test_result_packer` | 128-bit result word pack/unpack round-trip |
+| `test_systolic_topk_sw` | Systolic Top-K vs std::partial_sort |
+| `test_visited_bitmap` | HNSW visited bitmap operations |
+| `test_hnsw_preloader_sw` | HNSW graph binary fixture loading |
+| `test_multi_cluster` | Multi-cluster PQ ADC + global Top-K aggregation |
+| `test_adc_distance_sw` | ADC L2 distance vs golden fixtures |
+
 ```bash
-docker run --rm -v "$(pwd):/cortex" cortex-driver-build bash -c \
-  "cd /cortex/driver/build && ctest --output-on-failure"
-# 12/12 tests pass
+cd hw/build && cmake .. && make -j$(nproc) && ctest --output-on-failure
+# 9/9 tests pass
 ```
 
-### sys/ Unit Tests
-The system suite consists of 8 tests focused on Ceph integration.
+### driver/ Unit Tests
+
+5 CTest targets (100% pass, requires `libcortex_hw_mock.so` built first):
+
+| Test | What It Verifies |
+|---|---|
+| `test_smartssd_driver` | Driver lifecycle: init → write → search → shutdown |
+| `test_driver_abi` | C ABI contract: `cortex_api_version()`, dlopen loading |
+| `test_driver_hw_integration` | Full search round-trip + cache hit + eviction |
+| `test_driver_cache_stress` | LRU cache concurrent access stress |
+| `test_driver_errors` | Error paths: null handle, uninitialized, corrupt data |
+
+```bash
+cd driver/build
+cmake .. -DCORTEX_HW_LIB_DIR=$(pwd)/../../hw/build/lib && make -j$(nproc) && ctest --output-on-failure
+# 5/5 tests pass
+```
+
+### sys/ Integration Tests (requires Ceph build environment)
+
+8 tests in `sys_ceph/src/test/cortex/` covering Ceph↔Cortex integration:
 ```bash
 docker run --rm -v "$(pwd)/sys:/ceph" ceph-build:main.ubuntu22.04 bash -c \
   "apt-get install -y libeigen3-dev && \
@@ -242,7 +278,7 @@ The `cortex_read_result` structure uses a fixed array `entries[500]`. This desig
 ### dlopen for runtime loading
 The `CortexDriverLoader` uses `dlopen()` at OSD startup. This allows Ceph to maintain zero compile-time dependencies on the Cortex driver. If the driver is missing or if `cortex_api_version()` returns a mismatching value, the OSD logs a warning and gracefully falls back to returning `-ENOTSUP` for semantic operations.
 
-### Two-level locality-aware OpWQ
+### Three-level locality-aware OpWQ
 The `SemanticOpWQ` optimizes for hardware cache locality by classifying operations into three levels:
 - **P0**: The request targets the same cluster as the previous operation, ensuring L1/L2 cache hits.
 - **P1**: The request targets a different cluster that is already resident in the driver's DRAM cache.

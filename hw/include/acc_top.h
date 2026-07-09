@@ -6,12 +6,21 @@
 #include <hls_math.h>
 #include <ap_axi_sdata.h>
 
-// ─── Design Parameters (matches FPGA顶层模块设计 doc) ───
+// ─── Design Parameters ───
+// KS=256 hardcoded, KS field no longer stored in Header
+// FIFO_RES: 128b width, depth=TOPK_MAX
+// Result format: dist(FP32,32b) + doc_addr(64b) + doc_length(32b) = 128 bit
 #define M_MAX      48
 #define DIM_MAX    768
-#define KS         256
+#define KS         256         // Hardcoded, default PQ Codebook centroid count
 #define TOPK_MAX   500
 #define TOPK_BANK_SIZE 16    // Cells per systolic bank for pipeline balancing
+
+// ─── HNSW Graph Search Parameters ───
+#define HNSW_MAX_DEGREE    32     // Max neighbors per graph node
+#define HNSW_MAX_ITERS     500    // Max graph traversal iterations
+#define HNSW_MAX_NODES     200    // Max graph nodes (fits in BRAM)
+#define HNSW_NODE_SIZE     (DIM_SYN * 4 + 4 + HNSW_MAX_DEGREE * 4)  // vector + num_nbrs + nbr_ids
 
 // ─── Synthesis parameters (smaller for faster iteration) ───
 #define M_SYN      16
@@ -30,30 +39,23 @@ typedef ap_uint<128>  result_word_t;
 // ─── Internal stream words ───
 typedef ap_uint<512>  cb_pq_word_t;
 typedef ap_uint<128>  res_word_t;
-typedef ap_axiu<512, 0, 0, 0> axis_512_t;
-
-// ─── Candidate ───
-struct Candidate {
-    float        dist;
-    ap_uint<64>  doc_start_addr;
-    ap_uint<32>  doc_length;
-};
-
-// ─── IVF Header (64B) ───
-struct IVFHeader {
-    ap_uint<32>  codebook_dim;
-    ap_uint<32>  pq_dim;
-    ap_uint<32>  pq_vectors;
-    ap_uint<32>  reserved[13];
-};
 
 // ─── Metadata ───
 struct ComputeMeta {
     ap_uint<32>  m_actual;
     ap_uint<32>  dim_actual;
-    ap_uint<32>  n_vectors;
+    ap_uint<32>  n_vectors;       // PQ mode: N vectors; HNSW mode: num_nodes
     ap_uint<32>  top_k;
     ap_uint<2>   metric_id;
+    ap_uint<1>   search_mode;     // 0=IVFPQ, 1=HNSW graph search
+};
+
+// ─── HNSW Graph Header (in DRAM) ───
+struct HNSWGraphHeader {
+    ap_uint<32>  num_nodes;       // Total graph nodes
+    ap_uint<32>  entry_point;     // Start node for search
+    ap_uint<32>  dim;             // Vector dimension
+    ap_uint<32>  max_degree;      // Max neighbors per node
 };
 
 // ─── Systolic cell ───
@@ -95,7 +97,6 @@ void data_manager(
     ap_uint<64>                query_ddr_addr,
     hls::stream<cb_pq_word_t> &cb_fifo,
     hls::stream<cb_pq_word_t> &pq_fifo,
-    hls::stream<res_word_t>   &res_fifo_in,
     hls::stream<float>        &query_fifo,
     ComputeMeta                &meta_out,
     volatile bool              &dm_done,
@@ -111,6 +112,16 @@ void compute_engine(
     ComputeMeta                 meta_in,
     volatile bool              &comp_done,
     volatile bool               comp_start
+);
+
+// ─── HNSW Graph Search Engine ───
+void hnsw_search_engine(
+    hls::stream<float>        &query_fifo,
+    hls::stream<res_word_t>   &res_fifo_out,
+    ComputeMeta                 meta_in,
+    volatile bool              &comp_done,
+    volatile bool               comp_start,
+    ap_uint<8>                *dram
 );
 
 #endif

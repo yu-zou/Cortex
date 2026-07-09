@@ -1,1 +1,1 @@
-{"D": 32, "M": 4, "dsub": 8, "ksub": 16, "metric_type": 0, "num_queries": 5, "num_vectors": 100, "top_k": 10}
+{"M": 4, "D": 32, "dsub": 8, "ksub": 16, "num_queries": 5, "num_vectors": 100, "top_k": 10, "metric_type": 0}

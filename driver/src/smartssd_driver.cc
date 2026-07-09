@@ -147,7 +147,7 @@ void SmartSSDDriver::shutdown() {
 cortex_read_result SmartSSDDriver::semantic_read(
     uint32_t cluster_id, const void* object_data, uint64_t object_size,
     const float* query_vec, uint32_t query_dim, uint32_t top_k,
-    uint32_t metric_type)
+    uint32_t metric_type, uint32_t search_mode)
 {
     std::lock_guard<std::mutex> lk(mutex_);
 
@@ -183,7 +183,8 @@ cortex_read_result SmartSSDDriver::semantic_read(
     }
 
     MetricType metric = (metric_type == CORTEX_METRIC_IP) ? MetricType::InnerProduct : MetricType::L2;
-    SearchResult sr = device_->search(cluster_id, object_data, object_size, query_vec, query_dim, top_k, metric);
+    SearchMode mode = (search_mode == CORTEX_MODE_HNSW) ? SearchMode::HNSW : SearchMode::IVFPQ;
+    SearchResult sr = device_->search(cluster_id, object_data, object_size, query_vec, query_dim, top_k, metric, mode);
 
     result.status = sr.status;
     if (sr.status == 0) {
@@ -191,8 +192,10 @@ cortex_read_result SmartSSDDriver::semantic_read(
         if (count > CORTEX_TOPK_MAX) count = CORTEX_TOPK_MAX;
         result.count = count;
         for (uint32_t i = 0; i < count; ++i) {
-            result.entries[i].vector_id = sr.entries[i].vector_id;
-            result.entries[i].distance = sr.entries[i].distance;
+            result.entries[i].distance   = sr.entries[i].distance;
+            result.entries[i].doc_addr   = sr.entries[i].doc_addr;
+            result.entries[i].doc_length = sr.entries[i].doc_length;
+            result.entries[i]._pad       = 0;
         }
     }
 
@@ -206,7 +209,7 @@ int SmartSSDDriver::semantic_write(
 {
     std::lock_guard<std::mutex> lk(mutex_);
 
-    if (vector_count == 0 || codebook_size == 0) return 0;
+    if (codebook_size == 0) return 0;  // no data to write
 
     if (!initialized_) return -EINVAL;
 
