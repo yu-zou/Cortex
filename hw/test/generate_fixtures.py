@@ -49,9 +49,16 @@ def train_pq(base_vecs):
     return pq, codebook.astype(np.float32)
 
 def compute_codes(pq, base_vecs):
-    """PQ编码: Faiss outputs packed bytes, 展开为 M 个 uint8 per vector"""
+    """PQ encoding: unpacks Faiss codes to M uint8 per vector.
+    For NBITS=8: 1 byte per code → raw.shape = (N, M).
+    For NBITS=4: 2 codes per byte → unpack high/low nibbles."""
     raw = np.asarray(pq.compute_codes(as_float32(base_vecs)), dtype=np.uint8)
-    # NBITS=8 → 每字节一个code, raw.shape = (N, M)
+    if NBITS < 8:
+        # Unpack: each byte holds 2 codes (high nibble | low nibble)
+        high = (raw >> 4).reshape(base_vecs.shape[0], -1)
+        low  = (raw & 0x0F).reshape(base_vecs.shape[0], -1)
+        unpacked = np.concatenate([high, low], axis=1)[:, :M]
+        return unpacked.astype(np.uint8)
     return raw.reshape(base_vecs.shape[0], -1)
 
 def compute_adc_distances(queries, codebook, codes):
@@ -148,20 +155,25 @@ def generate():
     metadata = {
         "M": M,
         "KS": KS,
-        "DIM": DIM,
-        "DSUB": DSUB,
+        "D": DIM,
+        "dsub": DSUB,
+        "ksub": KS,
         "NBITS": NBITS,
         "num_vectors": NUM_VECTORS,
         "num_queries": NUM_QUERIES,
         "top_k": TOP_K,
         "metric_type": METRIC_TYPE,
         "header_format": "64B IVF Header: {M, DIM, N, reserved[13]}",
-        "pq_entry": f"M字节PQ码 + 8B doc_addr + 8B doc_length = {M}+16 字节",
+        "pq_entry": f"M PQ codes + 8B doc_addr + 8B doc_length = {M}+16 bytes",
     }
     with open(os.path.join(out_dir, "metadata.json"), "w", encoding="utf-8") as f:
         json.dump(metadata, f, sort_keys=True, indent=2)
 
     return out_dir
+
+def read_uint8_bin(path):
+    with open(path, "rb") as f:
+        return np.frombuffer(f.read(), dtype=np.uint8)
 
 def verify():
     out_dir = fixture_dir()

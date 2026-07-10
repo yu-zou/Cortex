@@ -1,1 +1,14 @@
-{"M": 4, "D": 32, "dsub": 8, "ksub": 16, "num_queries": 5, "num_vectors": 100, "top_k": 10, "metric_type": 0}
+{
+  "D": 32,
+  "KS": 16,
+  "M": 4,
+  "NBITS": 4,
+  "dsub": 8,
+  "header_format": "64B IVF Header: {M, DIM, N, reserved[13]}",
+  "ksub": 16,
+  "metric_type": 0,
+  "num_queries": 5,
+  "num_vectors": 100,
+  "pq_entry": "M PQ codes + 8B doc_addr + 8B doc_length = 4+16 bytes",
+  "top_k": 10
+}
