@@ -180,11 +180,8 @@ run_tests() {
 
     local HW_BUILD_DIR="${BUILD_DIR}/hw"
     if [[ -d "$HW_BUILD_DIR" ]]; then
-        # Note: hw tests compile with -DCORTEX_FIXTURE_DIR="/cortex/hw/test/fixtures/"
-        # (a Docker path).  If fixtures are not available at that location, the
-        # tests will fail at runtime with file-not-found.  This is a pre-existing
-        # limitation of the Docker-based build.  Falling back to running from the
-        # project root; create a /cortex symlink if needed for full hw coverage.
+        # Note: hw tests use CORTEX_FIXTURE_DIR defined in CMakeLists.txt
+        # (resolved via ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/).
         (cd "$HW_BUILD_DIR" && ctest --output-on-failure) || \
             warn "Some hw/ tests FAILED (see above). Coverage data may be incomplete."
     else
@@ -233,7 +230,7 @@ capture_coverage() {
     # Remove intermediate files
     rm -f "${COV_INFO}.base" "${COV_INFO}.test"
 
-    echo "Coverance data captured to ${COV_INFO}"
+    echo "Coverage data captured to ${COV_INFO}"
 }
 
 # ── Step 5: Generate HTML report ──────────────────────────────────────────
