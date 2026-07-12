@@ -1,5 +1,19 @@
 #include "../include/acc_top.h"
 
+// NU_PQ: per-sub-quantizer bit width array (from nu_bits.bin analysis).
+// KS_nu[m] = 2^bits[m], e.g. 256/16/4 for 8/4/2-bit.
+static const ap_uint<4> pq_bits[M_SYN] = {
+    8, 8, 8, 8,
+    4, 4, 4, 4,
+    2, 2, 2, 2,
+    4, 4, 4, 4
+};
+
+static ap_uint<10> pq_ks_from_bits(ap_uint<4> bits) {
+#pragma HLS INLINE
+    return ((ap_uint<10>)1) << bits;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // DATA MANAGER — Bidirectional DRAM interface
 // INPUT:  DRAM(AXI4-MM read) → cb_fifo, pq_fifo, query_fifo
@@ -11,6 +25,7 @@ void data_manager(
     ap_uint<64>                cluster_start_addr,
     ap_uint<64>                query_ddr_addr,
     ap_uint<64>                result_ddr_addr,
+    ap_uint<1>                 reload_codebook,
     hls::stream<cb_pq_word_t> &cb_fifo,
     hls::stream<cb_pq_word_t> &pq_fifo,
     hls::stream<float>        &query_fifo,
@@ -45,7 +60,19 @@ QRY_READ:
     }
 
     // Step 3: Compute sizes
-    ap_uint<32> cb_bytes = M_val * KS * Ds_val * 4;
+    ap_uint<10> ks_per_m[M_SYN];
+#pragma HLS ARRAY_PARTITION variable=ks_per_m complete dim=1
+    ap_uint<32> cb_total = 0;
+DM_KS_INIT:
+    for (int m = 0; m < M_SYN; m++) {
+#pragma HLS UNROLL
+        ks_per_m[m] = pq_ks_from_bits(pq_bits[m]);
+        if (m < M_val) {
+            cb_total += ks_per_m[m] * Ds_val;
+        }
+    }
+
+    ap_uint<32> cb_bytes = cb_total * 4;
     ap_uint<32> cb_beats = (cb_bytes + 63) / 64;
     ap_uint<32> pq_bytes = N_val * (M_val + 16);
     ap_uint<32> pq_beats = (pq_bytes + 63) / 64;
@@ -60,11 +87,13 @@ QRY_READ:
     // Step 4: Stream Codebook → FIFO_CB (burst-optimized: full-beat reads)
     ap_uint<64> cb_addr = cs + 64;
     ap_uint<512>* cb_beats_ptr = (ap_uint<512>*)(dram + cb_addr.to_uint64());
+    if (reload_codebook) {
 CB_STREAM:
-    for (ap_uint<32> b = 0; b < cb_beats; b++) {
+        for (ap_uint<32> b = 0; b < cb_beats; b++) {
 #pragma HLS PIPELINE II=1
-        cb_pq_word_t beat = cb_beats_ptr[b];
-        cb_fifo.write(beat);
+            cb_pq_word_t beat = cb_beats_ptr[b];
+            cb_fifo.write(beat);
+        }
     }
 
     // Step 5: Stream PQ Codes → FIFO_PQ
@@ -165,6 +194,7 @@ void compute_engine(
     hls::stream<res_word_t>   &res_fifo_out,
     hls::stream<float>        &query_fifo,
     ComputeMeta                 meta_in,
+    ap_uint<1>                  reload_codebook,
     volatile bool              &comp_done,
     volatile bool               comp_start
 ) {
@@ -177,8 +207,18 @@ void compute_engine(
     ap_uint<32> N_val   = meta_in.n_vectors;
     ap_uint<32> Ds_val  = DIM_val / M_val;
 
-    // Codebook BRAM
-    float codebook[M_SYN][KS][DS_SYN];
+    // NU_PQ: compute active centroid count for each sub-quantizer.
+    ap_uint<10> ks_per_m[M_SYN];
+#pragma HLS ARRAY_PARTITION variable=ks_per_m complete dim=1
+KS_INIT:
+    for (int m = 0; m < M_SYN; m++) {
+#pragma HLS UNROLL
+        ks_per_m[m] = pq_ks_from_bits(pq_bits[m]);
+    }
+
+    // Codebook BRAM. KS remains the max allocation; only entries
+    // [0, ks_per_m[m]) are valid for sub-quantizer m.
+    static float codebook[M_SYN][KS][DS_SYN];
 #pragma HLS RESOURCE variable=codebook core=RAM_2P_BRAM
 #pragma HLS ARRAY_PARTITION variable=codebook complete dim=1
 #pragma HLS ARRAY_PARTITION variable=codebook complete dim=3
@@ -195,24 +235,55 @@ QRY_LOAD:
     }
 
     // Stage 0: Load Codebook
-    ap_uint<32> cb_total = M_val * KS * Ds_val;
+    ap_uint<32> cb_total = 0;
+CB_TOTAL:
+    for (int m = 0; m < M_SYN; m++) {
+#pragma HLS UNROLL
+        if (m < M_val) {
+            cb_total += ks_per_m[m] * Ds_val;
+        }
+    }
     ap_uint<32> cb_beats = (cb_total * 4 + 63) / 64;
 
 CB_LOAD:
-    for (ap_uint<32> b = 0; b < cb_beats; b++) {
+    if (reload_codebook) {
+    CB_ZERO_M:
+        for (int m = 0; m < M_SYN; m++) {
+        CB_ZERO_K:
+            for (int k = 0; k < KS; k++) {
+            CB_ZERO_D:
+                for (int d = 0; d < DS_SYN; d++) {
 #pragma HLS PIPELINE II=1
-        cb_pq_word_t beat = cb_fifo.read();
-        for (int f = 0; f < 16; f++) {
+                    codebook[m][k][d] = 0.0f;
+                }
+            }
+        }
+
+        for (ap_uint<32> b = 0; b < cb_beats; b++) {
+#pragma HLS PIPELINE II=1
+            cb_pq_word_t beat = cb_fifo.read();
+            for (int f = 0; f < 16; f++) {
 #pragma HLS UNROLL
-            ap_uint<32> gidx = b * 16 + f;
-            if (gidx < cb_total) {
-                ap_uint<32> raw   = beat.range(32*f+31, 32*f);
-                float        val  = *((float*)&raw);
-                ap_uint<32> m_idx  = gidx / (KS * Ds_val);
-                ap_uint<32> rem    = gidx % (KS * Ds_val);
-                ap_uint<32> ks_idx = rem / Ds_val;
-                ap_uint<32> ds_idx = rem % Ds_val;
-                codebook[m_idx][ks_idx][ds_idx] = val;
+                ap_uint<32> gidx = b * 16 + f;
+                if (gidx < cb_total) {
+                    ap_uint<32> raw   = beat.range(32*f+31, 32*f);
+                    float        val  = *((float*)&raw);
+                    ap_uint<32> base = 0;
+                CB_MAP_M:
+                    for (int m = 0; m < M_SYN; m++) {
+#pragma HLS UNROLL
+                        ap_uint<32> span = ks_per_m[m] * Ds_val;
+                        if (m < M_val && gidx >= base && gidx < base + span) {
+                            ap_uint<32> rem    = gidx - base;
+                            ap_uint<32> ks_idx = rem / Ds_val;
+                            ap_uint<32> ds_idx = rem % Ds_val;
+                            codebook[m][ks_idx][ds_idx] = val;
+                        }
+                        if (m < M_val) {
+                            base += span;
+                        }
+                    }
+                }
             }
         }
     }
@@ -284,7 +355,10 @@ PQ_PROCESS:
         for (int m = 0; m < M_SYN; m++) {
 #pragma HLS UNROLL
             if (m < M_val) {
-                ap_uint<8> c = pq_codes[m];
+                ap_uint<8> c_raw = pq_codes[m];
+                ap_uint<9> mask_wide = (((ap_uint<9>)1) << pq_bits[m]) - 1;
+                ap_uint<8> mask = mask_wide.range(7, 0);
+                ap_uint<8> c = c_raw & mask;
                 float sub = 0.0f;
             ADC_D:
                 for (int d = 0; d < DS_SYN; d++) {
@@ -419,7 +493,7 @@ void acc_top(
     // ─── C Simulation: sequential execution ───
     // Step 1: Data Manager (INPUT: DRAM→FIFOs, OUTPUT: res_fifo_in→DRAM)
     dm_start = true;
-    data_manager(cluster_start_addr, query_ddr_addr, result_ddr_addr,
+    data_manager(cluster_start_addr, query_ddr_addr, result_ddr_addr, reload_codebook,
                  fifo_cb, fifo_pq, fifo_qry, fifo_res,
                  meta, dm_done, dm_start, dram);
 
@@ -433,7 +507,7 @@ void acc_top(
     } else {
         // Default: IVFPQ PQ search mode
         compute_engine(fifo_cb, fifo_pq, fifo_res, fifo_qry,
-                       meta, comp_done, comp_start);
+                       meta, reload_codebook, comp_done, comp_start);
     }
 
     done = dm_done && comp_done;
@@ -445,16 +519,17 @@ void acc_top(
                 done, start, dm_start, dm_done,
                 comp_start, comp_done);
 
-    data_manager(cluster_start_addr, query_ddr_addr,
-                 fifo_cb, fifo_pq, fifo_qry,
-                 meta, dm_done, dm_start, dram);
+        data_manager(cluster_start_addr, query_ddr_addr, result_ddr_addr,
+                     reload_codebook,
+                     fifo_cb, fifo_pq, fifo_qry, fifo_res,
+                     meta, dm_done, dm_start, dram);
 
     if (meta.search_mode == 1) {
         hnsw_search_engine(fifo_qry, fifo_res, meta,
                           comp_done, comp_start, dram);
     } else {
         compute_engine(fifo_cb, fifo_pq, fifo_res, fifo_qry,
-                       meta, comp_done, comp_start);
+                       meta, reload_codebook, comp_done, comp_start);
     }
 #endif
 }

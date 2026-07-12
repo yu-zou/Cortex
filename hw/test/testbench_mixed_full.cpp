@@ -108,8 +108,9 @@ int main() {
         volatile bool dm_done=false, comp_done=false;
         volatile bool dm_start=true,  comp_start=true;
 
-        data_manager(CLUSTER_BASE, QUERY_BASE, RESULT_BASE,
-                     fc, fp, fq, fr, meta,                 // fr moved after fq
+        ap_uint<1> reload_codebook = 1;
+        data_manager(CLUSTER_BASE, QUERY_BASE, RESULT_BASE, reload_codebook,
+                     fc, fp, fq, fr, meta,
                      dm_done, dm_start, dram);
         compute_engine(fc, fp, fr, fq, meta,
                        comp_done, comp_start);

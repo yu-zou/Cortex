@@ -99,6 +99,7 @@ void data_manager(
     ap_uint<64>                cluster_start_addr,
     ap_uint<64>                query_ddr_addr,
     ap_uint<64>                result_ddr_addr,
+    ap_uint<1>                 reload_codebook,
     hls::stream<cb_pq_word_t> &cb_fifo,
     hls::stream<cb_pq_word_t> &pq_fifo,
     hls::stream<float>        &query_fifo,
@@ -115,6 +116,7 @@ void compute_engine(
     hls::stream<res_word_t>   &res_fifo_out,
     hls::stream<float>        &query_fifo,
     ComputeMeta                 meta_in,
+    ap_uint<1>                  reload_codebook,
     volatile bool              &comp_done,
     volatile bool               comp_start
 );

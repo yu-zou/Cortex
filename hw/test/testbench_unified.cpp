@@ -62,7 +62,8 @@ int main() {
         hls::stream<cb_pq_word_t> fc,fp; hls::stream<float> fq; hls::stream<res_word_t> fr;
         ComputeMeta meta; volatile bool dd=false,cd=false,ds=true,cs=true;
 
-        data_manager(CB,QB,RB,fc,fp,fq,fr,meta,dd,ds,dram); // fr moved after fq
+        ap_uint<1> reload_codebook = 1;
+        data_manager(CB,QB,RB,reload_codebook,fc,fp,fq,fr,meta,dd,ds,dram);
         compute_engine(fc,fp,fr,fq,meta,cd,cs);
 
         int valid=0;

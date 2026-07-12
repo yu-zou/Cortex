@@ -233,17 +233,24 @@ int main(int argc, char **argv)
     float    query[128];
     TopKResult results[TOPK_MAX];
     struct timespec t_start, t_end;
+    static uint32_t last_cluster_id = UINT32_MAX;
 
     for (int q = 0; q < num_queries; q++) {
         clock_gettime(CLOCK_MONOTONIC, &t_start);
 
-        /* 3a. NVMe read cluster data into shared DRAM */
+        /* 3a. NVMe read cluster data into shared DRAM (skip if same cluster) */
         size_t cluster_bytes = CLUSTER_MAX_BYTES;  /* actual size from header */
-        if (nvme_read_cluster(NVME_DEVICE, cluster_id * 8192,
-                               cluster_buf, cluster_bytes) != 0) {
-            fprintf(stderr, "Query %d: NVMe read failed for cluster %d\n",
-                    q, cluster_id);
-            continue;
+        if (cluster_id == last_cluster_id) {
+            printf("[batch] cluster %d codebook reused\n", cluster_id);
+        } else {
+            if (nvme_read_cluster(NVME_DEVICE, cluster_id * 8192,
+                                   cluster_buf, cluster_bytes) != 0) {
+                fprintf(stderr, "Query %d: NVMe read failed for cluster %d\n",
+                        q, cluster_id);
+                continue;
+            }
+            printf("[cold] full load cluster %d\n", cluster_id);
+            last_cluster_id = cluster_id;
         }
 
         /* 3b. DMA cluster data to FPGA-visible DRAM region */

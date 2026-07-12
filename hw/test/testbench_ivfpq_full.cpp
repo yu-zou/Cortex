@@ -256,11 +256,13 @@ int main() {
 
     // ─── Phase 1: Data Manager ───
     cout << "\n>>> Calling data_manager() ..." << endl;
+    ap_uint<1> reload_codebook = 1;
     dm_start = true;
     data_manager(
         CLUSTER_BASE,           // cluster_start_addr
         QUERY_ADDR,             // query_ddr_addr
         RESULT_ADDR,            // result_ddr_addr (hardware output path)
+        reload_codebook,        // reload_codebook (1 = load codebook from DRAM)
         fifo_cb,                // cb_fifo (output: codebook stream)
         fifo_pq,                // pq_fifo (output: PQ code stream)
         fifo_qry,               // query_fifo (output: query vector)
