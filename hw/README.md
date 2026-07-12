@@ -88,7 +88,7 @@ A **unified FPGA accelerator** supporting two vector search modes, deployed as t
 | Mode | Algorithm | Storage | Fmax | LUT | Key Loop II |
 |---|---|---|---|---|---|
 | Mode 0 (IVFPQ) | IVF + Product Quantization | PQ compressed codes (M bytes/vector) | 278 MHz | 83% | PQ_PROCESS II=1 |
-| Mode 1 (HNSW) | HNSW Graph Traversal | Full vectors in BRAM | 245 MHz | 51% | SEQUENTIAL_TRAVERSE II=64 |
+| Mode 1 (HNSW) | HNSW Graph Traversal | Full vectors in BRAM | 245 MHz | 51% | SEQUENTIAL_TRAVERSE II=1 |
 
 **Shared hardware**: Systolic Top-K sorting array (500 cells, Fmax=1246MHz), L2 distance calculator
 
@@ -129,7 +129,7 @@ vitis_hls -f run_unified.tcl
 | FF | 330,180 (27%) | 334,764 (27%) |
 | BRAM | 128 (6%) | 150 (7%) |
 | DSP | 932 (26%) | 464 (13%) |
-| PQ_PROCESS / TRAVERSE II | 1 (depth 158) | 64 (depth 234) |
+| PQ_PROCESS / TRAVERSE II | 1 (depth 158) | 1 (depth 144) |
 
 Target device: Xilinx VU5P (xcvu5p-flva2104-1-e)
 Clock: 200 MHz (5 ns period)
@@ -184,7 +184,7 @@ Additional testbenches available: `testbench_cb_load.cpp` (codebook load), `test
 | TCL Script | Top Function | Fmax | LUT | Critical Loop II | Result |
 |---|---|---|---|---|---|
 | `run_adc_test.tcl` (csynth) | compute_engine | 278 MHz | 83% | PQ_PROCESS II=1 | PASS |
-| `run_hnsw_full.tcl` (csynth) | hnsw_search_engine | 245 MHz | 51% | TRAVERSE II=64 | PASS |
+| `run_hnsw_full.tcl` (csynth) | hnsw_search_engine | 245 MHz | 51% | TRAVERSE II=1 | PASS |
 | `run_topk_test.tcl` (csynth) | systolic_topk_insert | 1246 MHz | — | II=1 | PASS |
 
 ### HW CTest — Software Unit Tests (9/9 PASS)

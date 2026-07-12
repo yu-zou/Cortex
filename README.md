@@ -2,7 +2,7 @@
 
 Cortex (灵枢) is a Near-Data Processing (NDP) system designed for serverless RAG (Retrieval-Augmented Generation) vector search. It is built on top of Ceph distributed object storage and leverages SmartSSD FPGA acceleration to offload compute-intensive vector search operations directly to the storage layer.
 
-By offloading IVFPQ (Inverted File Product Quantization) ADC (Asymmetric Distance Computation) to SmartSSD devices, Cortex significantly reduces data movement between storage and host CPU, minimizing latency and maximizing throughput for large-scale vector retrieval.
+By offloading IVFPQ ADC and HNSW graph search to SmartSSD devices, Cortex significantly reduces data movement between storage and host CPU, minimizing latency and maximizing throughput for large-scale vector retrieval.
 
 The system consists of three independently-built components linked via a stable C ABI and runtime `dlopen()` mechanism:
 1. **hw/**: SmartSSD FPGA device layer (currently providing a high-performance mock implementation).
@@ -98,6 +98,12 @@ int cortex_semantic_write(
     uint32_t cluster_id, const void* codebook, uint64_t codebook_size,
     const void* pq_payload, uint64_t payload_size, uint32_t vector_count);
 
+int cortex_batch_search(
+    uint32_t cluster_id, const void* object_data, uint64_t object_size,
+    const float* queries, uint32_t batch_size, uint32_t query_dim,
+    uint32_t top_k, uint32_t metric_type, uint32_t search_mode,
+    struct cortex_read_result* results);
+
 int      cortex_is_cluster_cached(uint32_t cluster_id);
 uint32_t cortex_get_last_cluster_id(void);
 ```
@@ -130,6 +136,12 @@ Cortex/
 │       ├── rgw/                     # RGW semantic search (Eigen3 + async scatter)
 │       ├── osd/                     # OSD ops, PerfCounters, SemanticOpWQ
 │       └── loader/                  # CortexDriverLoader (dlopen)
+├── sw/                              # Software modules (ARM + Host)
+│   ├── arm/
+│   │   ├── scheduler.c              # ARM scheduler: NVMe→DMA→FPGA→poll→read
+│   │   └── Makefile                 # ARM cross-compile (arm-linux-gnueabihf-gcc)
+│   └── host/
+│       └── adaptive_nprobe.c        # Adaptive IVF nprobe decision
 └── scripts/
     └── build.sh                     # Docker-based build orchestration
 ```
