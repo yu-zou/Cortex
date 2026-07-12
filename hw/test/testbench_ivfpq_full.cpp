@@ -140,6 +140,7 @@ int main() {
     dram_byte_t* dram = new dram_byte_t[DRAM_SIZE]();
     const uint64_t CLUSTER_BASE = 0x10000;  // cluster_start_addr
     const uint64_t QUERY_ADDR   = 0x80000;  // query_ddr_addr
+    const uint64_t RESULT_ADDR  = 0x90000;  // result_ddr_addr (hardware output path)
 
     // ═════════════════════════════════════════════════════
     // Step 1: IVFHeader at CLUSTER_BASE (64 bytes)
@@ -259,10 +260,11 @@ int main() {
     data_manager(
         CLUSTER_BASE,           // cluster_start_addr
         QUERY_ADDR,             // query_ddr_addr
+        RESULT_ADDR,            // result_ddr_addr (hardware output path)
         fifo_cb,                // cb_fifo (output: codebook stream)
         fifo_pq,                // pq_fifo (output: PQ code stream)
-        fifo_res,               // res_fifo_in (unused by data_manager)
         fifo_qry,               // query_fifo (output: query vector)
+        fifo_res,               // res_fifo_in (input: results from compute_engine)
         meta,                   // meta_out (populated from IVFHeader)
         dm_done,                // done flag
         dm_start,               // start flag

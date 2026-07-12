@@ -48,6 +48,8 @@ struct ComputeMeta {
     ap_uint<32>  top_k;
     ap_uint<2>   metric_id;
     ap_uint<1>   search_mode;     // 0=IVFPQ, 1=HNSW graph search
+    ap_uint<32>  batch_count;     // Number of queries in batch (1=default, 0=invalid)
+                                  // FPGA: same cluster data, pipeline N queries sequentially
 };
 
 // ─── HNSW Graph Header (in DRAM) ───
@@ -69,6 +71,7 @@ struct TopKCell {
 void acc_top(
     ap_uint<64>  cluster_start_addr,
     ap_uint<64>  query_ddr_addr,
+    ap_uint<64>  result_ddr_addr,
     ap_uint<32>  top_k,
     ap_uint<2>   metric_id,
     ap_uint<1>   reload_codebook,
@@ -95,9 +98,11 @@ void control_fsm(
 void data_manager(
     ap_uint<64>                cluster_start_addr,
     ap_uint<64>                query_ddr_addr,
+    ap_uint<64>                result_ddr_addr,
     hls::stream<cb_pq_word_t> &cb_fifo,
     hls::stream<cb_pq_word_t> &pq_fifo,
     hls::stream<float>        &query_fifo,
+    hls::stream<res_word_t>   &res_fifo_in,
     ComputeMeta                &meta_out,
     volatile bool              &dm_done,
     volatile bool               dm_start,

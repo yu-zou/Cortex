@@ -91,6 +91,41 @@ int cortex_semantic_write(
 int cortex_is_cluster_cached(uint32_t cluster_id);
 uint32_t cortex_get_last_cluster_id(void);
 
+/* ─── Batch Query API ─── */
+
+#define CORTEX_BATCH_MAX 32
+
+/**
+ * cortex_batch_search — Search N query vectors against one cluster in a batch
+ * One PCIe transaction for all N queries; FPGA pipelines them through the same
+ * cluster data (ADC + Top-K for query[0], then query[1], ...).
+ *
+ * @cluster_id:  Cluster identifier
+ * @object_data: Raw cluster/graph data bytes
+ * @object_size: Size of object_data
+ * @queries:     Flat array of batch_size × query_dim floats (row-major)
+ * @batch_size:  1..CORTEX_BATCH_MAX (0 = error)
+ * @query_dim:   Vector dimension per query
+ * @top_k:       Results per query (max CORTEX_TOPK_MAX)
+ * @metric_type: CORTEX_METRIC_L2 or CORTEX_METRIC_IP
+ * @search_mode: CORTEX_MODE_IVFPQ or CORTEX_MODE_HNSW
+ * @results:     Output array[batch_size], each with top_k entries
+ *
+ * Returns 0 on success, negative error code on failure.
+ */
+int cortex_batch_search(
+    uint32_t cluster_id,
+    const void* object_data,
+    uint64_t object_size,
+    const float* queries,
+    uint32_t batch_size,
+    uint32_t query_dim,
+    uint32_t top_k,
+    uint32_t metric_type,
+    uint32_t search_mode,
+    struct cortex_read_result* results
+);
+
 #ifdef __cplusplus
 }
 #endif

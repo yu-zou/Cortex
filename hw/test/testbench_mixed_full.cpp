@@ -24,6 +24,7 @@ typedef ap_uint<8> dram_byte_t;
 // ─── Separate DRAM regions ───
 #define CLUSTER_BASE  0x10000   // IVFHeader + codebook + PQ codes
 #define QUERY_BASE    0x00000   // Query vector for IVFPQ
+#define RESULT_BASE   0x08000   // Result output (hardware path)
 #define GRAPH_BASE    0x80000   // HNSWGraphHeader + graph nodes
 
 // ─── Helper: write float to DRAM byte array ───
@@ -107,8 +108,8 @@ int main() {
         volatile bool dm_done=false, comp_done=false;
         volatile bool dm_start=true,  comp_start=true;
 
-        data_manager(CLUSTER_BASE, QUERY_BASE,
-                     fc, fp, fr, fq, meta,
+        data_manager(CLUSTER_BASE, QUERY_BASE, RESULT_BASE,
+                     fc, fp, fq, fr, meta,                 // fr moved after fq
                      dm_done, dm_start, dram);
         compute_engine(fc, fp, fr, fq, meta,
                        comp_done, comp_start);

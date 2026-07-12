@@ -1,17 +1,20 @@
 #include "../include/acc_top.h"
 
 // ═══════════════════════════════════════════════════════════════
-// DATA MANAGER — Read Header first, then Query
-// Steps: Header(64B) → Query(DIM floats) → Codebook(CB bytes) → PQ Codes(N * V bytes)
+// DATA MANAGER — Bidirectional DRAM interface
+// INPUT:  DRAM(AXI4-MM read) → cb_fifo, pq_fifo, query_fifo
+// OUTPUT: res_fifo_in ← Compute Engine → DRAM(AXI4-MM write) for ARM to read
 // DRAM layout: [Header 64B][Codebook M*256*Ds*4B][PQ Codes N*(M+16)B]
-// PQ entry: M-byte PQ code + 8-byte doc_addr + 8-byte doc_length = M+16 bytes
+// Result layout: [Results TOPK_MAX×128b] at result_ddr_addr
 // ═══════════════════════════════════════════════════════════════
 void data_manager(
     ap_uint<64>                cluster_start_addr,
     ap_uint<64>                query_ddr_addr,
+    ap_uint<64>                result_ddr_addr,
     hls::stream<cb_pq_word_t> &cb_fifo,
     hls::stream<cb_pq_word_t> &pq_fifo,
     hls::stream<float>        &query_fifo,
+    hls::stream<res_word_t>   &res_fifo_in,
     ComputeMeta                &meta_out,
     volatile bool              &dm_done,
     volatile bool               dm_start,
@@ -54,25 +57,18 @@ QRY_READ:
     meta_out.metric_id  = 0;
     meta_out.search_mode = 0;   // default IVFPQ mode
 
-    // Step 4: Stream Codebook → FIFO_CB
+    // Step 4: Stream Codebook → FIFO_CB (burst-optimized: full-beat reads)
     ap_uint<64> cb_addr = cs + 64;
+    ap_uint<512>* cb_beats_ptr = (ap_uint<512>*)(dram + cb_addr.to_uint64());
 CB_STREAM:
     for (ap_uint<32> b = 0; b < cb_beats; b++) {
 #pragma HLS PIPELINE II=1
-        cb_pq_word_t beat = 0;
-        for (int f = 0; f < 16; f++) {
-#pragma HLS UNROLL
-            ap_uint<32> gidx = b * 16 + f;
-            if (gidx * 4 < cb_bytes) {
-                ap_uint<32>* src = (ap_uint<32>*)(dram + cb_addr.to_uint64());
-                beat.range(32*f+31, 32*f) = src[gidx];
-            }
-        }
+        cb_pq_word_t beat = cb_beats_ptr[b];
         cb_fifo.write(beat);
     }
 
     // Step 5: Stream PQ Codes → FIFO_PQ
-    // Each entry gets 1 beat (512-bit), padded with zeros
+    // Byte-level reads preserve LE byte order for compute_engine's right-align logic
     ap_uint<64> pq_addr = cs + 64 + cb_bytes;
     ap_uint<32> entry_bytes = M_val + 16;
 PQ_STREAM:
@@ -80,15 +76,32 @@ PQ_STREAM:
 #pragma HLS PIPELINE II=1
         cb_pq_word_t beat = 0;
         ap_uint<64> entry_off = n.to_uint64() * entry_bytes;
-        // Pack entry at HIGH bits of beat, zero-pad LOW bits
         for (int by = 0; by < 64 && by < entry_bytes; by++) {
 #pragma HLS UNROLL
             ap_uint<64> src_byte = entry_off + by;
-            // Place at high end: byte goes to beat[511-by*8 : 511-by*8-7]
             beat.range(511 - by*8, 511 - by*8 - 7) = dram[pq_addr.to_uint64() + src_byte];
         }
         pq_fifo.write(beat);
     }
+
+    // Step 6: Write Results (Compute Engine → res_fifo_in → DRAM)
+    // Hardware path only — in CSIM, testbench reads fifo_res directly since
+    // data_manager and compute_engine execute sequentially and fifo_res is
+    // empty when data_manager runs first.
+#ifdef __SYNTHESIS__
+    // Results pushed by compute_engine Stage 5, written by DM to DRAM for ARM.
+    // Format: TOPK_MAX × 128-bit [dist(32b) | doc_addr(64b) | doc_len(32b)]
+    ap_uint<32>* res_ptr = (ap_uint<32>*)(dram + result_ddr_addr.to_uint64());
+RESULT_WRITE:
+    for (ap_uint<32> i = 0; i < TOPK_MAX; i++) {
+#pragma HLS PIPELINE II=1
+        res_word_t entry = res_fifo_in.read();
+        res_ptr[i * 4 + 0] = entry.range(31, 0);     // dist (FP32)
+        res_ptr[i * 4 + 1] = entry.range(63, 32);     // doc_addr low 32b
+        res_ptr[i * 4 + 2] = entry.range(95, 64);     // doc_addr high 32b
+        res_ptr[i * 4 + 3] = entry.range(127, 96);    // doc_len
+    }
+#endif
 
     dm_done = true;
 }
@@ -363,6 +376,7 @@ COMP_WAIT:
 void acc_top(
     ap_uint<64>  cluster_start_addr,
     ap_uint<64>  query_ddr_addr,
+    ap_uint<64>  result_ddr_addr,
     ap_uint<32>  top_k,
     ap_uint<2>   metric_id,
     ap_uint<1>   reload_codebook,
@@ -372,6 +386,7 @@ void acc_top(
 ) {
 #pragma HLS INTERFACE s_axilite port=cluster_start_addr
 #pragma HLS INTERFACE s_axilite port=query_ddr_addr
+#pragma HLS INTERFACE s_axilite port=result_ddr_addr
 #pragma HLS INTERFACE s_axilite port=top_k
 #pragma HLS INTERFACE s_axilite port=metric_id
 #pragma HLS INTERFACE s_axilite port=reload_codebook
@@ -402,10 +417,10 @@ void acc_top(
 
 #ifndef __SYNTHESIS__
     // ─── C Simulation: sequential execution ───
-    // Step 1: Data Manager
+    // Step 1: Data Manager (INPUT: DRAM→FIFOs, OUTPUT: res_fifo_in→DRAM)
     dm_start = true;
-    data_manager(cluster_start_addr, query_ddr_addr,
-                 fifo_cb, fifo_pq, fifo_qry,
+    data_manager(cluster_start_addr, query_ddr_addr, result_ddr_addr,
+                 fifo_cb, fifo_pq, fifo_qry, fifo_res,
                  meta, dm_done, dm_start, dram);
 
     // Step 2: Route to appropriate engine
@@ -497,7 +512,7 @@ void hnsw_search_engine(
     // ─── BRAM: Adjacency List [MAX_NODES][MAX_DEG] ───
     ap_uint<32> adjacency[HNSW_MAX_NODES][HNSW_MAX_DEGREE];
 #pragma HLS RESOURCE variable=adjacency core=RAM_2P_BRAM
-#pragma HLS ARRAY_PARTITION variable=adjacency cyclic factor=4 dim=1
+#pragma HLS ARRAY_PARTITION variable=adjacency cyclic factor=8 dim=1
 
     // ─── BRAM: Num Neighbors per Node ───
     ap_uint<8> num_nbrs[HNSW_MAX_NODES];
@@ -539,8 +554,10 @@ QRY_LOAD_HNSW:
     }
 
     // ─── Visited Bitmap ───
+    // Changed from RAM_1P_BRAM to complete partition (register array)
+    // Eliminates the RAW hazard that forced SEQUENTIAL_TRAVERSE II=64
     ap_uint<1> visited[HNSW_MAX_NODES];
-#pragma HLS RESOURCE variable=visited core=RAM_1P_BRAM
+#pragma HLS ARRAY_PARTITION variable=visited complete dim=1
 VISIT_INIT:
     for (ap_uint<32> i = 0; i < HNSW_MAX_NODES; i++) {
 #pragma HLS PIPELINE II=1
@@ -561,22 +578,21 @@ TK_INIT_HNSW:
     // Seed: mark entry as visited (distance computed after loop)
     visited[entry_node] = 1;
 
-    // ═══ Sequential Graph Traversal (no BFS queue) ═══
-    // Visit each node once. For node i, process all its neighbors.
-    // If neighbor j > i, it will be visited when we reach j.
-    // Simpler than BFS → HLS can pipeline efficiently.
-    
-    // First pass: mark all reachable nodes by following edges from entry
-    ap_uint<32> iter = 0;
+    // ═══ Sequential Graph Traversal (pipelined, not unrolled) ═══
+    // visited[] is now a register array (complete partition) - zero-cycle access.
+    // NBR_LOOP runs one neighbor per cycle (PIPELINE II=1, factor=1 prevents auto-unroll).
+    // vectors[] dim=2 is already complete-partitioned = 128 independent BRAM banks.
 
 SEQUENTIAL_TRAVERSE:
-    for (iter = 0; iter < num_nodes && iter < HNSW_MAX_NODES; iter++) {
+    for (ap_uint<32> iter = 0; iter < num_nodes && iter < HNSW_MAX_NODES; iter++) {
+#pragma HLS LOOP_TRIPCOUNT min=20 max=200
         ap_uint<8> nn = num_nbrs[iter];
 
-        // ─── Process neighbors of current node ───
-        // NOT unrolled: one neighbor per cycle (sequential, pipelined)
+        // ─── Process neighbors one per cycle (pipelined, not unrolled) ───
     NBR_LOOP:
         for (ap_uint<8> ni = 0; ni < MAX_DEG; ni++) {
+#pragma HLS PIPELINE II=1
+#pragma HLS UNROLL factor=1
             if (ni < nn) {
                 ap_uint<32> nbr_id = adjacency[iter][ni];
 
@@ -603,9 +619,9 @@ SEQUENTIAL_TRAVERSE:
                     // Insert into systolic Top-K
                     systolic_topk_insert(nbr_dist, nbr_id.to_uint64(), 0, cells);
                 }
-            } // ni < nn
-        } // NBR_LOOP
-    } // SEQUENTIAL_TRAVERSE
+            }
+        }
+    }
 
     // Also process the entry node itself
     visited[entry_node] = 1;

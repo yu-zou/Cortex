@@ -41,7 +41,7 @@ int main() {
     cout << "\n--- MODE 0: IVFPQ PQ Search ---" << endl;
     {
         dram_byte_t* dram = new dram_byte_t[DRAM_SIZE]();
-        const uint64_t CB = 0x10000, QB = 0x80000;
+        const uint64_t CB = 0x10000, QB = 0x80000, RB = 0x90000;
 
         write_u32(dram, CB+0, TB_M); write_u32(dram, CB+4, TB_DIM);
         write_u32(dram, CB+8, TB_N_PQ);
@@ -62,7 +62,7 @@ int main() {
         hls::stream<cb_pq_word_t> fc,fp; hls::stream<float> fq; hls::stream<res_word_t> fr;
         ComputeMeta meta; volatile bool dd=false,cd=false,ds=true,cs=true;
 
-        data_manager(CB,QB,fc,fp,fr,fq,meta,dd,ds,dram);
+        data_manager(CB,QB,RB,fc,fp,fq,fr,meta,dd,ds,dram); // fr moved after fq
         compute_engine(fc,fp,fr,fq,meta,cd,cs);
 
         int valid=0;
