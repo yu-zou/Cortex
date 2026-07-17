@@ -1,19 +1,5 @@
 #include "../include/acc_top.h"
 
-// NU_PQ: per-sub-quantizer bit width array (from nu_bits.bin analysis).
-// KS_nu[m] = 2^bits[m], e.g. 256/16/4 for 8/4/2-bit.
-static const ap_uint<4> pq_bits[M_SYN] = {
-    8, 8, 8, 8,
-    4, 4, 4, 4,
-    2, 2, 2, 2,
-    4, 4, 4, 4
-};
-
-static ap_uint<10> pq_ks_from_bits(ap_uint<4> bits) {
-#pragma HLS INLINE
-    return ((ap_uint<10>)1) << bits;
-}
-
 // ═══════════════════════════════════════════════════════════════
 // DATA MANAGER — Bidirectional DRAM interface
 // INPUT:  DRAM(AXI4-MM read) → cb_fifo, pq_fifo, query_fifo
@@ -59,20 +45,8 @@ QRY_READ:
         query_fifo.write(*((float*)&raw));
     }
 
-    // Step 3: Compute sizes
-    ap_uint<10> ks_per_m[M_SYN];
-#pragma HLS ARRAY_PARTITION variable=ks_per_m complete dim=1
-    ap_uint<32> cb_total = 0;
-DM_KS_INIT:
-    for (int m = 0; m < M_SYN; m++) {
-#pragma HLS UNROLL
-        ks_per_m[m] = pq_ks_from_bits(pq_bits[m]);
-        if (m < M_val) {
-            cb_total += ks_per_m[m] * Ds_val;
-        }
-    }
-
-    ap_uint<32> cb_bytes = cb_total * 4;
+    // Step 3: Compute sizes (uniform KS=256 for all sub-quantizers)
+    ap_uint<32> cb_bytes = M_val * KS * Ds_val * 4;
     ap_uint<32> cb_beats = (cb_bytes + 63) / 64;
     ap_uint<32> pq_bytes = N_val * (M_val + 16);
     ap_uint<32> pq_beats = (pq_bytes + 63) / 64;
@@ -207,17 +181,7 @@ void compute_engine(
     ap_uint<32> N_val   = meta_in.n_vectors;
     ap_uint<32> Ds_val  = DIM_val / M_val;
 
-    // NU_PQ: compute active centroid count for each sub-quantizer.
-    ap_uint<10> ks_per_m[M_SYN];
-#pragma HLS ARRAY_PARTITION variable=ks_per_m complete dim=1
-KS_INIT:
-    for (int m = 0; m < M_SYN; m++) {
-#pragma HLS UNROLL
-        ks_per_m[m] = pq_ks_from_bits(pq_bits[m]);
-    }
-
-    // Codebook BRAM. KS remains the max allocation; only entries
-    // [0, ks_per_m[m]) are valid for sub-quantizer m.
+    // Codebook BRAM (uniform KS=256 — all entries valid).
     static float codebook[M_SYN][KS][DS_SYN];
 #pragma HLS RESOURCE variable=codebook core=RAM_2P_BRAM
 #pragma HLS ARRAY_PARTITION variable=codebook complete dim=1
@@ -235,14 +199,7 @@ QRY_LOAD:
     }
 
     // Stage 0: Load Codebook
-    ap_uint<32> cb_total = 0;
-CB_TOTAL:
-    for (int m = 0; m < M_SYN; m++) {
-#pragma HLS UNROLL
-        if (m < M_val) {
-            cb_total += ks_per_m[m] * Ds_val;
-        }
-    }
+    ap_uint<32> cb_total = M_val * KS * Ds_val;
     ap_uint<32> cb_beats = (cb_total * 4 + 63) / 64;
 
 CB_LOAD:
@@ -272,7 +229,7 @@ CB_LOAD:
                 CB_MAP_M:
                     for (int m = 0; m < M_SYN; m++) {
 #pragma HLS UNROLL
-                        ap_uint<32> span = ks_per_m[m] * Ds_val;
+                        ap_uint<32> span = KS * Ds_val;
                         if (m < M_val && gidx >= base && gidx < base + span) {
                             ap_uint<32> rem    = gidx - base;
                             ap_uint<32> ks_idx = rem / Ds_val;
@@ -355,10 +312,7 @@ PQ_PROCESS:
         for (int m = 0; m < M_SYN; m++) {
 #pragma HLS UNROLL
             if (m < M_val) {
-                ap_uint<8> c_raw = pq_codes[m];
-                ap_uint<9> mask_wide = (((ap_uint<9>)1) << pq_bits[m]) - 1;
-                ap_uint<8> mask = mask_wide.range(7, 0);
-                ap_uint<8> c = c_raw & mask;
+                ap_uint<8> c = pq_codes[m];
                 float sub = 0.0f;
             ADC_D:
                 for (int d = 0; d < DS_SYN; d++) {
