@@ -39,18 +39,6 @@ add_executable(test_systolic_topk_sw test_systolic_topk_sw.cpp)
 target_link_libraries(test_systolic_topk_sw GTest::gtest_main)
 add_test(NAME test_systolic_topk_sw COMMAND test_systolic_topk_sw)
 
-# test_visited_bitmap — standalone
-add_executable(test_visited_bitmap test_visited_bitmap.cpp)
-target_link_libraries(test_visited_bitmap GTest::gtest_main)
-add_test(NAME test_visited_bitmap COMMAND test_visited_bitmap)
-
-# test_hnsw_preloader_sw — needs fixtures dir
-add_executable(test_hnsw_preloader_sw test_hnsw_preloader_sw.cpp)
-target_compile_definitions(test_hnsw_preloader_sw PRIVATE
-  CORTEX_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/"
-)
-target_link_libraries(test_hnsw_preloader_sw GTest::gtest_main)
-add_test(NAME test_hnsw_preloader_sw COMMAND test_hnsw_preloader_sw)
 
 # test_multi_cluster — needs mock, fixtures, and src includes
 add_executable(test_multi_cluster test_multi_cluster.cpp)

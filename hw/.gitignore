@@ -1,6 +1,5 @@
 # Vitis HLS build artifacts - DO NOT COMMIT
-hnsw_proj/
-unified_proj/
+# unified_proj/   — removed (no longer used)
 *_proj/
 vitis_hls.log
 vitis_*.log
@@ -24,8 +23,5 @@ csim/
 # HLS test project directories (generated during synthesis)
 adc_test_proj/
 topk_test_proj/
-hnsw_full_proj/
 ivfpq_full_proj/
-mixed_full_proj/
-unified_proj/
 acc_top_proj/

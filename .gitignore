@@ -11,8 +11,8 @@ driver/build/
 
 # === Vitis HLS project files (already covered by hw/.gitignore, double-safe here) ===
 hw/*_proj/
-hw/hnsw_proj/
-hw/unified_proj/
+# hw/hnsw_proj/    — removed (no longer used)
+# hw/unified_proj/ — removed (no longer used)
 hw/acc_top_proj/
 hw/vitis_hls.log
 hw/vitis_*.log
