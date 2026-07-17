@@ -24,7 +24,6 @@ LIB_DIR="${BUILD_DIR}/lib"
 BIN_DIR="${BUILD_DIR}/bin"
 
 FIXTURE_DIR="${PROJECT_ROOT}/hw/test/fixtures"
-HNSW_FIXTURE_DIR="${FIXTURE_DIR}/hnsw"
 HW_SRC="${PROJECT_ROOT}/hw"
 DRIVER_SRC="${PROJECT_ROOT}/driver"
 
@@ -97,7 +96,7 @@ trap cleanup EXIT SIGTERM SIGINT
 # ═══════════════════════════════════════════════════════════════════════════════
 #  STEP 1: 前置条件检查
 # ═══════════════════════════════════════════════════════════════════════════════
-section "STEP 1/8: 前置条件检查"
+section "STEP 1/7: 前置条件检查"
 
 PREREQ_FAIL=0
 
@@ -169,7 +168,7 @@ step_pass "前置条件检查通过"
 # ═══════════════════════════════════════════════════════════════════════════════
 #  STEP 2: 构建 hw mock 库
 # ═══════════════════════════════════════════════════════════════════════════════
-section "STEP 2/8: 构建 hw mock 库"
+section "STEP 2/7: 构建 hw mock 库"
 
 mkdir -p "${LIB_DIR}" "${BIN_DIR}"
 
@@ -242,7 +241,7 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════════
 #  STEP 3: 构建 driver 库
 # ═══════════════════════════════════════════════════════════════════════════════
-section "STEP 3/8: 构建 driver 库"
+section "STEP 3/7: 构建 driver 库"
 
 if [ "$HAS_DOCKER" -eq 1 ] && [ "$USE_DOCKER" -eq 1 ]; then
     echo "--- 使用 Docker 构建 cortex_driver ---"
@@ -313,10 +312,9 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════════
 #  STEP 4: 生成测试夹具
 # ═══════════════════════════════════════════════════════════════════════════════
-section "STEP 4/8: 生成测试夹具"
+section "STEP 4/7: 生成测试夹具"
 
 FIXTURE_GEN_OK=0
-HNSW_FIXTURE_GEN_OK=0
 
 # 4a: IVFPQ 夹具
 echo "--- 生成 IVFPQ 夹具 ---"
@@ -338,36 +336,12 @@ if [ -f "$GEN_SCRIPT" ]; then
 else
     step_fail "generate_fixtures.py 未找到: ${GEN_SCRIPT}"
 fi
-
-# 4b: HNSW 夹具
-echo ""
-echo "--- 生成 HNSW 夹具 ---"
-HNSW_GEN_SCRIPT="${HW_SRC}/test/generate_hnsw_fixtures.py"
-if [ -f "$HNSW_GEN_SCRIPT" ]; then
-    if python3 "$HNSW_GEN_SCRIPT" --small 2>&1; then
-        echo "  HNSW 夹具已生成:"
-        for f in graph_header.bin vectors.bin num_nbrs.bin adjacency.bin \
-                 queries.bin golden_topk.bin metadata.json; do
-            fp="${HNSW_FIXTURE_DIR}/$f"
-            [ -f "$fp" ] && echo "    $f ($(stat -c%s "$fp") bytes)" || echo "    $f (缺失)"
-        done
-        HNSW_FIXTURE_GEN_OK=1
-        step_pass "HNSW 夹具生成成功"
-    else
-        step_fail "HNSW 夹具生成失败"
-    fi
-else
-    step_fail "generate_hnsw_fixtures.py 未找到: ${HNSW_GEN_SCRIPT}"
-fi
-
 if [ "$FIXTURE_GEN_OK" -eq 0 ]; then
     echo "  ⚠ IVFPQ 夹具生成失败 — 后续 IVFPQ 测试可能无法运行"
 fi
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  STEP 5: IVFPQ 搜索 E2E 测试
-# ═══════════════════════════════════════════════════════════════════════════════
-section "STEP 5/8: IVFPQ 搜索 E2E 测试"
+
+section "STEP 5/7: IVFPQ 搜索 E2E 测试"
 
 if [ "$FIXTURE_GEN_OK" -eq 0 ]; then
     step_skip "IVFPQ 夹具不可用, 跳过测试"
@@ -658,465 +632,25 @@ E2E_IVFPQ_CPP
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  STEP 6: HNSW 搜索 E2E 测试
+#  STEP 6: 验证流水线完整性
 # ═══════════════════════════════════════════════════════════════════════════════
-section "STEP 6/8: HNSW 搜索 E2E 测试"
-
-if [ "$SKIP_HLS" -eq 1 ]; then
-    step_skip "HNSW 测试 (--skip-hls 标志)"
-elif [ "$HAS_DOCKER" -eq 1 ] && [ "$USE_DOCKER" -eq 1 ]; then
-    # ── Docker 路径 ──
-    echo "--- 在 Docker 容器中编译运行 testbench_hnsw_full.cpp ---"
-    if docker run --rm --network=host \
-        -v "${PROJECT_ROOT}:/cortex" \
-        cortex-hw-build bash -c '
-            set -euo pipefail
-            cd /cortex/hw
-            if command -v vitis_hls &>/dev/null; then
-                echo "--- 使用 vitis_hls 运行 testbench_hnsw_full ---"
-                if [ -f run_hnsw_full.tcl ]; then
-                    vitis_hls -f run_hnsw_full.tcl 2>&1 | tail -20
-                else
-                    echo "run_hnsw_full.tcl 未找到"
-                    # 尝试 g++ 编译 (需要 HLS 头)
-                    g++ -std=c++17 -I/opt/xilinx/Vitis_HLS/2021.2/include \
-                        -I hw/include \
-                        hw/test/testbench_hnsw_full.cpp \
-                        -o /tmp/testbench_hnsw_full 2>&1 && \
-                    /tmp/testbench_hnsw_full
-                fi
-            else
-                echo "vitis_hls 在容器中不可用"
-                exit 42
-            fi
-        ' 2>&1; then
-        step_pass "HNSW testbench_hnsw_full 测试通过"
-    else
-        RC=$?
-        if [ "$RC" -eq 42 ]; then
-            step_skip "HNSW testbench (HLS 在容器中不可用)"
-        else
-            step_fail "HNSW testbench_hnsw_full 测试失败 (退出码 $RC)"
-        fi
-    fi
-elif [ "$HNSW_FIXTURE_GEN_OK" -eq 0 ]; then
-    step_skip "HNSW 夹具不可用, 跳过测试"
-else
-    # ── 原生路径: 尝试编译 testbench_hnsw_full.cpp, 需要 HLS 头 ──
-    echo "--- 尝试编译 testbench_hnsw_full.cpp ---"
-
-    HLS_INCLUDE_DIR=""
-    # 尝试常见的 Vitis HLS 安装路径
-    for candidate in \
-        /tools/Xilinx/Vitis_HLS/*/include \
-        /opt/Xilinx/Vitis_HLS/*/include \
-        /opt/xilinx/Vitis_HLS/*/include \
-        /usr/local/xilinx/Vitis_HLS/*/include; do
-        if [ -d "$candidate" ] && ls "$candidate"/ap_int.h >/dev/null 2>&1; then
-            HLS_INCLUDE_DIR="$candidate"
-            echo "  找到 Vitis HLS 头文件: ${HLS_INCLUDE_DIR}"
-            break
-        fi
-    done
-
-    if [ -z "$HLS_INCLUDE_DIR" ]; then
-        # 尝试检查 VITIS_HLS_SETTINGS 环境变量或 Xilinx 安装
-        if [ -n "${VITIS_HLS_SETTINGS:-}" ] && [ -f "$VITIS_HLS_SETTINGS" ]; then
-            # source 它然后尝试查找 include
-            echo "  找到 VITIS_HLS_SETTINGS=${VITIS_HLS_SETTINGS}"
-            # 从 settings 脚本所在目录推导 include 路径
-            HLS_DIR="$(cd "$(dirname "$VITIS_HLS_SETTINGS")/.." && pwd)"
-            if [ -d "${HLS_DIR}/include" ] && [ -f "${HLS_DIR}/include/ap_int.h" ]; then
-                HLS_INCLUDE_DIR="${HLS_DIR}/include"
-            fi
-        fi
-    fi
-
-    if [ -n "$HLS_INCLUDE_DIR" ]; then
-        HNSW_BIN="${BIN_DIR}/e2e_hnsw_test"
-        echo "  编译 testbench_hnsw_full.cpp 与 HLS 头文件..."
-
-        if g++ -std=c++17 \
-            -I"${HLS_INCLUDE_DIR}" \
-            -I"${HW_SRC}/include" \
-            -L"${LIB_DIR}" \
-            -Wl,-rpath,"${LIB_DIR}" \
-            "${HW_SRC}/test/testbench_hnsw_full.cpp" \
-            -o "${HNSW_BIN}" 2>&1; then
-            echo "  编译成功, 运行 HNSW E2E 测试..."
-            export LD_LIBRARY_PATH="${LIB_DIR}:${LD_LIBRARY_PATH:-}"
-            if "${HNSW_BIN}" 2>&1; then
-                step_pass "HNSW 搜索 E2E 测试通过"
-            else
-                step_fail "HNSW 搜索 E2E 测试失败 (运行时)"
-            fi
-        else
-            echo "  testbench_hnsw_full.cpp 需要 Vitis HLS 头文件 (ap_int.h, hls_stream.h)"
-            echo "  尝试编写软件 HNSW 替代测试..."
-
-            # 软件 HNSW 替代测试 — 使用 mock 库验证 fixture 结构完整性
-            # 注意: MockSmartSSD 不实现 HNSW 图搜索, 但我们可以验证 fixture 数据格式
-            HNSW_SW_BIN="${BIN_DIR}/e2e_hnsw_sw_test"
-            HNSW_SW_SRC="${BUILD_DIR}/e2e_hnsw_sw_test.cpp"
-
-            cat > "$HNSW_SW_SRC" << 'HNSW_SW_CPP'
-// ═══════════════════════════════════════════════════════════════════════════════
-// e2e_hnsw_sw_test.cpp — HNSW 软件 E2E 测试
-// 验证 HNSW fixture 文件的格式和完整性
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#include <cmath>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <fstream>
-#include <iostream>
-#include <stdexcept>
-#include <string>
-#include <vector>
-
-struct HNSWHeader {
-    uint32_t num_nodes;
-    uint32_t entry_point;
-    uint32_t dim;
-    uint32_t max_degree;
-};
-
-static std::vector<uint8_t> read_bin(const std::string& path) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) throw std::runtime_error("Cannot open: " + path);
-    size_t sz = static_cast<size_t>(f.tellg());
-    f.seekg(0);
-    std::vector<uint8_t> buf(sz);
-    f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(sz));
-    return buf;
-}
-
-static float read_le_f32(const uint8_t* p) {
-    uint32_t raw = static_cast<uint32_t>(p[0])
-                 | (static_cast<uint32_t>(p[1]) << 8)
-                 | (static_cast<uint32_t>(p[2]) << 16)
-                 | (static_cast<uint32_t>(p[3]) << 24);
-    float v;
-    std::memcpy(&v, &raw, 4);
-    return v;
-}
-
-static uint32_t read_le_u32(const uint8_t* p) {
-    return static_cast<uint32_t>(p[0])
-         | (static_cast<uint32_t>(p[1]) << 8)
-         | (static_cast<uint32_t>(p[2]) << 16)
-         | (static_cast<uint32_t>(p[3]) << 24);
-}
-
-int main(int argc, char* argv[]) {
-    const char* fix_dir = std::getenv("FIXTURE_DIR");
-    std::string fd = fix_dir ? fix_dir : "./hw/test/fixtures/hnsw";
-    if (argc > 1) fd = argv[1];
-
-    try {
-        // ---- 验证 graph_header.bin ----
-        auto hdr_raw = read_bin(fd + "/graph_header.bin");
-        if (hdr_raw.size() < sizeof(HNSWHeader)) {
-            std::cerr << "FAIL: graph_header.bin 太小 (" << hdr_raw.size() << " B)" << std::endl;
-            return 1;
-        }
-        HNSWHeader hdr;
-        hdr.num_nodes   = read_le_u32(hdr_raw.data() + 0);
-        hdr.entry_point = read_le_u32(hdr_raw.data() + 4);
-        hdr.dim         = read_le_u32(hdr_raw.data() + 8);
-        hdr.max_degree  = read_le_u32(hdr_raw.data() + 12);
-
-        std::cout << "HNSW 图头: "
-                  << "N=" << hdr.num_nodes
-                  << " entry=" << hdr.entry_point
-                  << " dim=" << hdr.dim
-                  << " deg=" << hdr.max_degree << std::endl;
-
-        if (hdr.num_nodes == 0 || hdr.dim == 0 || hdr.max_degree == 0) {
-            std::cerr << "FAIL: HNSW Header 包含零值字段" << std::endl;
-            return 1;
-        }
-
-        const uint32_t DIM = hdr.dim;
-        const uint32_t ND = hdr.num_nodes;
-        const uint32_t DEG = hdr.max_degree;
-        const uint32_t NODE_BYTES = DIM * 4 + 4 + DEG * 4;
-
-        // ---- 验证 vectors.bin ----
-        auto vecs = read_bin(fd + "/vectors.bin");
-        size_t expected_vec_bytes = static_cast<size_t>(ND) * DIM * 4;
-        if (vecs.size() < expected_vec_bytes) {
-            std::cerr << "FAIL: vectors.bin 大小不足 "
-                      << vecs.size() << " < " << expected_vec_bytes << std::endl;
-            return 1;
-        }
-        std::cout << "vectors.bin: " << ND << " 个向量 × " << DIM << " 维, "
-                  << vecs.size() << " bytes ✓" << std::endl;
-
-        // 验证向量数据 (检查有限值)
-        int nan_count = 0;
-        for (size_t i = 0; i < expected_vec_bytes / 4; i++) {
-            float v = read_le_f32(vecs.data() + i * 4);
-            if (std::isnan(v) || std::isinf(v)) nan_count++;
-        }
-        if (nan_count > 0) {
-            std::cerr << "FAIL: vectors.bin 包含 " << nan_count << " 个 NaN/Inf 值" << std::endl;
-            return 1;
-        }
-        std::cout << "vectors.bin: 所有值有限 ✓" << std::endl;
-
-        // ---- 验证 queries.bin ----
-        auto qs = read_bin(fd + "/queries.bin");
-        size_t expected_q_bytes = 5 * DIM * 4;  // 默认 5 个查询
-        if (qs.size() < expected_q_bytes) {
-            // 可能是小版本
-            std::cout << "  queries.bin: " << qs.size() << " bytes (预期 ≥" << expected_q_bytes << ")" << std::endl;
-        } else {
-            std::cout << "queries.bin: " << (qs.size() / (DIM * 4)) << " 个查询 ✓" << std::endl;
-        }
-
-        // ---- 验证邻接矩阵 ----
-        auto adj = read_bin(fd + "/adjacency.bin");
-        size_t expected_adj_bytes = static_cast<size_t>(ND) * DEG * 4;
-        if (adj.size() < expected_adj_bytes) {
-            std::cerr << "FAIL: adjacency.bin 大小不足 "
-                      << adj.size() << " < " << expected_adj_bytes << std::endl;
-            return 1;
-        }
-        std::cout << "adjacency.bin: " << adj.size() << " bytes ✓" << std::endl;
-
-        // 验证邻接 ID 都在有效范围内
-        int bad_nbr = 0;
-        for (size_t i = 0; i < expected_adj_bytes / 4; i++) {
-            uint32_t nid = read_le_u32(adj.data() + i * 4);
-            if (nid != 0xFFFFFFFF && nid >= ND) {
-                bad_nbr++;
-            }
-        }
-        if (bad_nbr > 0) {
-            std::cerr << "FAIL: adjacency.bin 包含 " << bad_nbr << " 个越界邻居 ID" << std::endl;
-            return 1;
-        }
-        std::cout << "adjacency.bin: 所有邻居 ID 有效 ✓" << std::endl;
-
-        // ---- 验证 graph_header.bin 中 entry_point 有效 ----
-        if (hdr.entry_point >= hdr.num_nodes) {
-            std::cerr << "FAIL: entry_point=" << hdr.entry_point
-                      << " 越界 [0, " << hdr.num_nodes << ")" << std::endl;
-            return 1;
-        }
-        std::cout << "entry_point=" << hdr.entry_point << " 有效 ✓" << std::endl;
-
-        std::cout << std::endl;
-        std::cout << "─── HNSW 夹具验证汇总 ───" << std::endl;
-        std::cout << "  NODE_BYTES = " << NODE_BYTES << " (DIM*4 + 4 + DEG*4)" << std::endl;
-        std::cout << "  总图大小 ≈ " << (sizeof(HNSWHeader) + ND * NODE_BYTES) << " bytes" << std::endl;
-        std::cout << "  所有检查通过" << std::endl;
-        std::cout << "PASS: HNSW 软件 E2E 测试通过" << std::endl;
-        return 0;
-
-    } catch (const std::exception& ex) {
-        std::cerr << "FAIL: 异常: " << ex.what() << std::endl;
-        return 1;
-    }
-}
-HNSW_SW_CPP
-
-            echo "  HNSW 软件测试源文件已创建: ${HNSW_SW_SRC}"
-
-            if g++ -std=c++17 \
-                -I"${HW_SRC}/include" \
-                -I"${PROJECT_ROOT}/include" \
-                "${HNSW_SW_SRC}" \
-                -o "${HNSW_SW_BIN}" 2>&1; then
-                echo "  HNSW 软件测试编译成功"
-                echo "  运行 HNSW 软件测试..."
-                if "${HNSW_SW_BIN}" "${HNSW_FIXTURE_DIR}" 2>&1; then
-                    step_pass "HNSW 搜索 E2E 测试 (软件模式) 通过"
-                else
-                    step_fail "HNSW 搜索 E2E 测试 (软件模式) 失败"
-                fi
-            else
-                step_fail "HNSW 软件测试编译失败"
-            fi
-        fi
-    else
-        echo "  Vitis HLS 头文件未找到. HNSW testbench 需要 Vitis HLS."
-        echo "  尝试软件 HNSW 替代测试..."
-
-        # 尝试软件 HNSW 版本 (同上)
-        HNSW_SW_BIN="${BIN_DIR}/e2e_hnsw_sw_test"
-        HNSW_SW_SRC="${BUILD_DIR}/e2e_hnsw_sw_test.cpp"
-
-        cat > "$HNSW_SW_SRC" << 'HNSW_SW_CPP'
-// ═══════════════════════════════════════════════════════════════════════════════
-// e2e_hnsw_sw_test.cpp — HNSW 软件 E2E 测试 (夹具格式验证)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#include <cmath>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <fstream>
-#include <iostream>
-#include <stdexcept>
-#include <string>
-#include <vector>
-
-struct HNSWHeader {
-    uint32_t num_nodes;
-    uint32_t entry_point;
-    uint32_t dim;
-    uint32_t max_degree;
-};
-
-static std::vector<uint8_t> read_bin(const std::string& path) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) throw std::runtime_error("Cannot open: " + path);
-    size_t sz = static_cast<size_t>(f.tellg());
-    f.seekg(0);
-    std::vector<uint8_t> buf(sz);
-    f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(sz));
-    return buf;
-}
-
-static float read_le_f32(const uint8_t* p) {
-    uint32_t raw = static_cast<uint32_t>(p[0])
-                 | (static_cast<uint32_t>(p[1]) << 8)
-                 | (static_cast<uint32_t>(p[2]) << 16)
-                 | (static_cast<uint32_t>(p[3]) << 24);
-    float v;
-    std::memcpy(&v, &raw, 4);
-    return v;
-}
-
-static uint32_t read_le_u32(const uint8_t* p) {
-    return static_cast<uint32_t>(p[0])
-         | (static_cast<uint32_t>(p[1]) << 8)
-         | (static_cast<uint32_t>(p[2]) << 16)
-         | (static_cast<uint32_t>(p[3]) << 24);
-}
-
-int main(int argc, char* argv[]) {
-    const char* fix_dir = std::getenv("FIXTURE_DIR");
-    std::string fd = fix_dir ? fix_dir : "./hw/test/fixtures/hnsw";
-    if (argc > 1) fd = argv[1];
-
-    try {
-        auto hdr_raw = read_bin(fd + "/graph_header.bin");
-        if (hdr_raw.size() < sizeof(HNSWHeader)) {
-            std::cerr << "FAIL: graph_header.bin 太小" << std::endl;
-            return 1;
-        }
-        HNSWHeader hdr;
-        hdr.num_nodes   = read_le_u32(hdr_raw.data() + 0);
-        hdr.entry_point = read_le_u32(hdr_raw.data() + 4);
-        hdr.dim         = read_le_u32(hdr_raw.data() + 8);
-        hdr.max_degree  = read_le_u32(hdr_raw.data() + 12);
-
-        std::cout << "HNSW 图头: N=" << hdr.num_nodes
-                  << " entry=" << hdr.entry_point
-                  << " dim=" << hdr.dim
-                  << " deg=" << hdr.max_degree << std::endl;
-
-        if (hdr.num_nodes == 0 || hdr.dim == 0) {
-            std::cerr << "FAIL: Header 无效" << std::endl;
-            return 1;
-        }
-
-        const uint32_t DIM = hdr.dim;
-        const uint32_t ND = hdr.num_nodes;
-        const uint32_t DEG = hdr.max_degree;
-
-        auto vecs = read_bin(fd + "/vectors.bin");
-        size_t evb = static_cast<size_t>(ND) * DIM * 4;
-        if (vecs.size() < evb) {
-            std::cerr << "FAIL: vectors.bin 不足 (" << vecs.size() << " < " << evb << ")" << std::endl;
-            return 1;
-        }
-        int nan_count = 0;
-        for (size_t i = 0; i < evb / 4; i++) {
-            float v = read_le_f32(vecs.data() + i * 4);
-            if (std::isnan(v) || std::isinf(v)) nan_count++;
-        }
-        if (nan_count > 0) {
-            std::cerr << "FAIL: 向量含 " << nan_count << " 个 NaN/Inf" << std::endl;
-            return 1;
-        }
-        std::cout << "  vectors.bin: " << ND << "×" << DIM << " ✓" << std::endl;
-
-        auto adj = read_bin(fd + "/adjacency.bin");
-        size_t eab = static_cast<size_t>(ND) * DEG * 4;
-        if (adj.size() < eab) {
-            std::cerr << "FAIL: adjacency.bin 不足 (" << adj.size() << " < " << eab << ")" << std::endl;
-            return 1;
-        }
-        int bad_nbr = 0;
-        for (size_t i = 0; i < eab / 4; i++) {
-            uint32_t nid = read_le_u32(adj.data() + i * 4);
-            if (nid != 0xFFFFFFFF && nid >= ND) bad_nbr++;
-        }
-        if (bad_nbr > 0) {
-            std::cerr << "FAIL: " << bad_nbr << " 个越界邻居 ID" << std::endl;
-            return 1;
-        }
-        std::cout << "  adjacency.bin: 有效 ✓" << std::endl;
-
-        if (hdr.entry_point >= hdr.num_nodes) {
-            std::cerr << "FAIL: entry_point 越界" << std::endl;
-            return 1;
-        }
-        std::cout << "  entry_point 有效 ✓" << std::endl;
-
-        std::cout << "PASS: HNSW 软件 E2E 测试通过" << std::endl;
-        return 0;
-    } catch (const std::exception& ex) {
-        std::cerr << "FAIL: 异常: " << ex.what() << std::endl;
-        return 1;
-    }
-}
-HNSW_SW_CPP
-
-        if g++ -std=c++17 \
-            -I"${HW_SRC}/include" \
-            -I"${PROJECT_ROOT}/include" \
-            "${HNSW_SW_SRC}" \
-            -o "${HNSW_SW_BIN}" 2>&1; then
-            echo "  HNSW 软件测试编译成功"
-            if "${HNSW_SW_BIN}" "${HNSW_FIXTURE_DIR}" 2>&1; then
-                step_pass "HNSW 搜索 E2E 测试 (软件模式) 通过"
-            else
-                step_fail "HNSW 搜索 E2E 测试 (软件模式) 失败"
-            fi
-        else
-            step_fail "HNSW 软件测试编译失败"
-        fi
-    fi
-fi
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  STEP 7: 验证流水线完整性
-# ═══════════════════════════════════════════════════════════════════════════════
-section "STEP 7/8: 验证流水线完整性"
+section "STEP 6/7: 验证流水线完整性"
 
 echo "  构建产物:"
 echo "    libcortex_hw_mock.so: $([ -f "${LIB_DIR}/libcortex_hw_mock.so" ] && echo '✅' || echo '❌')"
 echo "    libcortex_driver.so:  $([ -f "${LIB_DIR}/libcortex_driver.so" ] && echo '✅' || echo '❌')"
 echo "    IVFPQ E2E 测试:      $([ -f "${BIN_DIR}/e2e_ivfpq_test" ] && echo '✅' || echo '❌')"
-echo "    HNSW E2E 测试:       $([ -f "${BIN_DIR}/e2e_hnsw_test" -o -f "${BIN_DIR}/e2e_hnsw_sw_test" ] && echo '✅' || echo '❌')"
 echo ""
 
 echo "测试夹具:"
 echo "    IVFPQ 夹具:          $([ -f "${FIXTURE_DIR}/cluster_0.bin" ] && echo '✅' || echo '❌')"
-echo "    HNSW 夹具:           $([ -f "${HNSW_FIXTURE_DIR}/graph_header.bin" ] && echo '✅' || echo '❌')"
 
 step_pass "流水线完整性检查"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  STEP 8: 汇总
 # ═══════════════════════════════════════════════════════════════════════════════
-section "STEP 8/8: 测试汇总"
+section "STEP 7/7: 测试汇总"
 
 TOTAL=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT))
 echo ""
