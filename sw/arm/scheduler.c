@@ -209,6 +209,7 @@ static void prefetch_stop(void)
 /* ═══════════════════════════════════════════════════════════
  * MAIN SCHEDULER LOOP
  * ═══════════════════════════════════════════════════════════ */
+#ifndef UNIT_TEST
 int main(int argc, char **argv)
 {
     int cluster_id = 0;
@@ -309,3 +310,4 @@ int main(int argc, char **argv)
     free((void *)fpga_map);
     return 0;
 }
+#endif /* UNIT_TEST */
