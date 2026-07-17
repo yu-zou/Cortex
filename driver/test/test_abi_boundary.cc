@@ -96,7 +96,7 @@ TEST(ABIBoundary, IVFHeaderLayout) {
 //
 //   m_actual    @  0  ap_uint<32>  4 B   — M (sub-quantizers)
 //   dim_actual  @  4  ap_uint<32>  4 B   — DIM (vector dimension)
-//   n_vectors   @  8  ap_uint<32>  4 B   — #vectors (PQ) or #nodes (HNSW)
+//   n_vectors   @  8  ap_uint<32>  4 B   — #vectors (PQ)
 //   top_k       @ 12  ap_uint<32>  4 B   — requested top-K
 //   metric_id   @ 16  ap_uint<2>   1 B   — 0=L2, 1=IP
 //   search_mode @ 17  ap_uint<1>   1 B   — 0=IVFPQ, 1=HNSW
@@ -166,46 +166,6 @@ TEST(ABIBoundary, ComputeMetaLayout) {
         printf("  LAYOUT MISMATCH!\n");
         printf("  Actual offsets: ma=%zu da=%zu nv=%zu tk=%zu mi=%zu sm=%zu  sz=%zu\n",
                off_ma, off_da, off_nv, off_tk, off_mi, off_sm, sz);
-    }
-}
-
-// =============================================================================
-// Test 3: HNSWGraphHeader layout
-//
-// DRAM header for HNSW graph search path:
-//   num_nodes    @  0  ap_uint<32>  4 B
-//   entry_point  @  4  ap_uint<32>  4 B
-//   dim          @  8  ap_uint<32>  4 B
-//   max_degree   @ 12  ap_uint<32>  4 B
-//             total = 16 B
-// =============================================================================
-TEST(ABIBoundary, HNSWGraphHeaderLayout) {
-    printf("=== HNSWGraphHeader (acc_top.h) ===\n");
-
-    const size_t sz = sizeof(HNSWGraphHeader);
-    printf("  sizeof(HNSWGraphHeader) = %zu  (expect 16)\n", sz);
-
-    const size_t off_nn = OFF_(HNSWGraphHeader, num_nodes);
-    const size_t off_ep = OFF_(HNSWGraphHeader, entry_point);
-    const size_t off_di = OFF_(HNSWGraphHeader, dim);
-    const size_t off_md = OFF_(HNSWGraphHeader, max_degree);
-
-    printf("  num_nodes   @ %zu  (expect 0)\n",  off_nn);
-    printf("  entry_point @ %zu  (expect 4)\n",  off_ep);
-    printf("  dim         @ %zu  (expect 8)\n",  off_di);
-    printf("  max_degree  @ %zu  (expect 12)\n", off_md);
-
-    EXPECT_EQ(sz,    16u) << "HNSWGraphHeader must be exactly 16 bytes";
-    EXPECT_EQ(off_nn, 0u) << "num_nodes must be at offset 0";
-    EXPECT_EQ(off_ep, 4u) << "entry_point must be at offset 4";
-    EXPECT_EQ(off_di, 8u) << "dim must be at offset 8";
-    EXPECT_EQ(off_md, 12u) << "max_degree must be at offset 12";
-
-    if (HasFailure()) {
-        printf("  LAYOUT MISMATCH!\n");
-        printf("  Expected: 16 B total, nn@0 ep@4 dim@8 md@12\n");
-        printf("  Actual:   %zu B total, nn@%zu ep@%zu dim@%zu md@%zu\n",
-               sz, off_nn, off_ep, off_di, off_md);
     }
 }
 

@@ -183,7 +183,7 @@ cortex_read_result SmartSSDDriver::semantic_read(
     }
 
     MetricType metric = (metric_type == CORTEX_METRIC_IP) ? MetricType::InnerProduct : MetricType::L2;
-    SearchMode mode = (search_mode == CORTEX_MODE_HNSW) ? SearchMode::HNSW : SearchMode::IVFPQ;
+    SearchMode mode = SearchMode::IVFPQ;
     SearchResult sr = device_->search(cluster_id, object_data, object_size, query_vec, query_dim, top_k, metric, mode);
 
     result.status = sr.status;
