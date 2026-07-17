@@ -82,7 +82,7 @@ DM_KS_INIT:
     meta_out.n_vectors  = N_val;
     meta_out.top_k      = TOPK_MAX;
     meta_out.metric_id  = 0;
-    meta_out.search_mode = 0;   // default IVFPQ mode
+    // meta_out.search_mode removed — compute_engine is the only execution path
 
     // Step 4: Stream Codebook → FIFO_CB (burst-optimized: full-beat reads)
     ap_uint<64> cb_addr = cs + 64;
@@ -497,18 +497,10 @@ void acc_top(
                  fifo_cb, fifo_pq, fifo_qry, fifo_res,
                  meta, dm_done, dm_start, dram);
 
-    // Step 2: Route to appropriate engine
+    // Step 2: compute_engine is the only execution path
     comp_start = true;
-    if (meta.search_mode == 1) {
-        // HNSW graph search mode: uses DRAM directly + query_fifo
-        // (fifo_cb/fifo_pq not used in HNSW mode)
-        hnsw_search_engine(fifo_qry, fifo_res, meta,
-                          comp_done, comp_start, dram);
-    } else {
-        // Default: IVFPQ PQ search mode
-        compute_engine(fifo_cb, fifo_pq, fifo_res, fifo_qry,
-                       meta, reload_codebook, comp_done, comp_start);
-    }
+    compute_engine(fifo_cb, fifo_pq, fifo_res, fifo_qry,
+                   meta, reload_codebook, comp_done, comp_start);
 
     done = dm_done && comp_done;
 #else
@@ -524,205 +516,10 @@ void acc_top(
                      fifo_cb, fifo_pq, fifo_qry, fifo_res,
                      meta, dm_done, dm_start, dram);
 
-    if (meta.search_mode == 1) {
-        hnsw_search_engine(fifo_qry, fifo_res, meta,
-                          comp_done, comp_start, dram);
-    } else {
-        compute_engine(fifo_cb, fifo_pq, fifo_res, fifo_qry,
-                       meta, reload_codebook, comp_done, comp_start);
-    }
+    compute_engine(fifo_cb, fifo_pq, fifo_res, fifo_qry,
+                   meta, reload_codebook, comp_done, comp_start);
 #endif
 }
 
 
-// ═══════════════════════════════════════════════════════════════
-// HNSW GRAPH SEARCH ENGINE (BRAM-based, synthesizable)
-// ═══════════════════════════════════════════════════════════════
-//
-// Implements HNSW graph traversal on FPGA, inspired by SmartANNS
-// (Tian et al., USENIX ATC 2024).
-//
-// Key design: pre-load graph data (vectors + adjacency lists) into
-// partitioned BRAM. Traversal reads BRAM only — no dynamic DRAM
-// access during search. Neighbors processed sequentially at II=1.
-// Reuses systolic Top-K and L2 distance from IVFPQ engine.
-//
-// DRAM layout (for initial load):
-//   [HNSWGraphHeader (16B)] [Node0: DIM floats | num_nbrs(u32) | nbr_ids[MAX_DEG*u32]] ...
-
-void hnsw_search_engine(
-    hls::stream<float>        &query_fifo,
-    hls::stream<res_word_t>   &res_fifo_out,
-    ComputeMeta                 meta_in,
-    volatile bool              &comp_done,
-    volatile bool               comp_start,
-    ap_uint<8>                *dram
-) {
-#pragma HLS INTERFACE m_axi port=dram depth=1048576 offset=direct
-#pragma HLS INTERFACE ap_ctrl_none port=return
-    comp_done = false;
-    if (!comp_start) return;
-
-    ap_uint<32> num_nodes  = meta_in.n_vectors;
-    ap_uint<32> DIM_val    = meta_in.dim_actual;
-    ap_uint<32> top_k      = meta_in.top_k;
-    const ap_uint<32> MAX_DEG = HNSW_MAX_DEGREE;
-
-    // ─── Read Graph Header ───
-    HNSWGraphHeader ghdr;
-    ap_uint<32>* hdr_ptr = (ap_uint<32>*)dram;
-    ghdr.num_nodes   = hdr_ptr[0];
-    ghdr.entry_point = hdr_ptr[1];
-    ghdr.dim         = hdr_ptr[2];
-    ghdr.max_degree  = hdr_ptr[3];
-    ap_uint<32> entry_node = ghdr.entry_point;
-    ap_uint<64> graph_data_off = 16;
-
-    // ─── BRAM: Vector Store [MAX_NODES][DIM] ───
-    // Partitioned on dim=2 (complete) = DIM independent BRAMs for parallel reads
-    float vectors[HNSW_MAX_NODES][DIM_SYN];
-#pragma HLS RESOURCE variable=vectors core=RAM_2P_BRAM
-#pragma HLS ARRAY_PARTITION variable=vectors complete dim=2
-
-    // ─── BRAM: Adjacency List [MAX_NODES][MAX_DEG] ───
-    ap_uint<32> adjacency[HNSW_MAX_NODES][HNSW_MAX_DEGREE];
-#pragma HLS RESOURCE variable=adjacency core=RAM_2P_BRAM
-#pragma HLS ARRAY_PARTITION variable=adjacency cyclic factor=8 dim=1
-
-    // ─── BRAM: Num Neighbors per Node ───
-    ap_uint<8> num_nbrs[HNSW_MAX_NODES];
-#pragma HLS RESOURCE variable=num_nbrs core=RAM_1P_BRAM
-
-    // ─── Pre-load Graph from DRAM → BRAM ───
-    // Sequential per-node load: 1 float/cycle (pipelined), no UNROLL on DRAM reads
-    ap_uint<32> node_bytes = DIM_val * 4 + 4 + MAX_DEG * 4;
-PRELOAD_NODES:
-    for (ap_uint<32> n = 0; n < num_nodes && n < HNSW_MAX_NODES; n++) {
-#pragma HLS PIPELINE II=1
-        ap_uint<64> node_off = graph_data_off + n.to_uint64() * node_bytes;
-        ap_uint<32>* vptr = (ap_uint<32>*)(dram + node_off.to_uint64());
-
-        // Load vector sequentially (1 float per cycle)
-        for (ap_uint<32> d = 0; d < DIM_SYN; d++) {
-            if (d < DIM_val) {
-                vectors[n][d] = *((float*)&vptr[d]);
-            }
-        }
-
-        // Load num_neighbors
-        ap_uint<32> nn = vptr[DIM_val];
-        num_nbrs[n] = (nn < MAX_DEG) ? nn : MAX_DEG;
-
-        // Load neighbor IDs sequentially
-        for (ap_uint<32> k = 0; k < MAX_DEG; k++) {
-            adjacency[n][k] = vptr[DIM_val + 1 + k];
-        }
-    }
-
-    // ─── Load Query ───
-    float query[DIM_SYN];
-#pragma HLS ARRAY_PARTITION variable=query complete dim=1
-QRY_LOAD_HNSW:
-    for (ap_uint<32> i = 0; i < DIM_val; i++) {
-#pragma HLS PIPELINE II=1
-        query[i] = query_fifo.read();
-    }
-
-    // ─── Visited Bitmap ───
-    // Changed from RAM_1P_BRAM to complete partition (register array)
-    // Eliminates the RAW hazard that forced SEQUENTIAL_TRAVERSE II=64
-    ap_uint<1> visited[HNSW_MAX_NODES];
-#pragma HLS ARRAY_PARTITION variable=visited complete dim=1
-VISIT_INIT:
-    for (ap_uint<32> i = 0; i < HNSW_MAX_NODES; i++) {
-#pragma HLS PIPELINE II=1
-        visited[i] = 0;
-    }
-
-    // ─── Systolic Top-K ───
-    TopKCell cells[TOPK_MAX];
-#pragma HLS ARRAY_PARTITION variable=cells complete dim=1
-TK_INIT_HNSW:
-    for (int i = 0; i < TOPK_MAX; i++) {
-#pragma HLS UNROLL
-        cells[i].best_dist = 3.402823466e+38f;
-        cells[i].best_addr = 0;
-        cells[i].best_len  = 0;
-    }
-
-    // Seed: mark entry as visited (distance computed after loop)
-    visited[entry_node] = 1;
-
-    // ═══ Sequential Graph Traversal (pipelined, not unrolled) ═══
-    // visited[] is now a register array (complete partition) - zero-cycle access.
-    // NBR_LOOP runs one neighbor per cycle (PIPELINE II=1, factor=1 prevents auto-unroll).
-    // vectors[] dim=2 is already complete-partitioned = 128 independent BRAM banks.
-
-SEQUENTIAL_TRAVERSE:
-    for (ap_uint<32> iter = 0; iter < num_nodes && iter < HNSW_MAX_NODES; iter++) {
-#pragma HLS LOOP_TRIPCOUNT min=20 max=200
-        ap_uint<8> nn = num_nbrs[iter];
-
-        // ─── Process neighbors one per cycle (pipelined, not unrolled) ───
-    NBR_LOOP:
-        for (ap_uint<8> ni = 0; ni < MAX_DEG; ni++) {
-#pragma HLS PIPELINE II=1
-#pragma HLS UNROLL factor=1
-            if (ni < nn) {
-                ap_uint<32> nbr_id = adjacency[iter][ni];
-
-                if (nbr_id < num_nodes && visited[nbr_id] == 0) {
-                    visited[nbr_id] = 1;
-
-                    // ─── L2 Distance (pipelined: 16 groups × 8 dims) ───
-                    float nbr_dist = 0.0f;
-                NBR_DIST_GROUPS:
-                    for (ap_uint<32> g = 0; g < DIM_SYN; g += 8) {
-#pragma HLS UNROLL
-                        float group_sum = 0.0f;
-                    NBR_DIST:
-                        for (ap_uint<32> d = g; d < g + 8; d++) {
-#pragma HLS UNROLL
-                            if (d < DIM_val) {
-                                float diff = query[d] - vectors[nbr_id][d];
-                                group_sum += diff * diff;
-                            }
-                        }
-                        nbr_dist += group_sum;
-                    }
-
-                    // Insert into systolic Top-K
-                    systolic_topk_insert(nbr_dist, nbr_id.to_uint64(), 0, cells);
-                }
-            }
-        }
-    }
-
-    // Also process the entry node itself
-    visited[entry_node] = 1;
-    {
-        float entry_dist = 0.0f;
-        for (ap_uint<32> d = 0; d < DIM_SYN; d++) {
-#pragma HLS UNROLL
-            if (d < DIM_val) {
-                float diff = query[d] - vectors[entry_node][d];
-                entry_dist += diff * diff;
-            }
-        }
-        systolic_topk_insert(entry_dist, entry_node.to_uint64(), 0, cells);
-    }
-
-    // ─── Push Results ───
-RESULT_PUSH_HNSW:
-    for (int i = 0; i < TOPK_MAX; i++) {
-#pragma HLS PIPELINE II=1
-        res_word_t result = 0;
-        ap_uint<32> dist_bits = *((ap_uint<32>*)&cells[i].best_dist);
-        result.range(31,  0)  = dist_bits;
-        result.range(95,  32) = cells[i].best_addr;
-        result.range(127, 96) = cells[i].best_len;
-        res_fifo_out.write(result);
-    }
-
-    comp_done = true;
-}
+// HNSW search engine removed — compute_engine is the only execution path
