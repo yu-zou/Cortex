@@ -17,7 +17,7 @@ public:
 
     cortex::SearchResult search(uint32_t, const void*, uint64_t,
                                 const float*, uint32_t, uint32_t,
-                                cortex::MetricType) override {
+                                cortex::MetricType, cortex::SearchMode) override {
         return {};
     }
 

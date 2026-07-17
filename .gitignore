@@ -1,0 +1,32 @@
+# === Ceph source (downloaded as reference, NOT part of Cortex project) ===
+sys_ceph/
+
+# === Build artifacts ===
+build/
+hw/build/
+driver/build/
+*.o
+*.so
+*.a
+
+# === Vitis HLS project files (already covered by hw/.gitignore, double-safe here) ===
+hw/*_proj/
+# hw/hnsw_proj/    — removed (no longer used)
+# hw/unified_proj/ — removed (no longer used)
+hw/acc_top_proj/
+hw/vitis_hls.log
+hw/vitis_*.log
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === Internal tool files ===
+.sisyphus/
+.omo/
