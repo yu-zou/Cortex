@@ -1,0 +1,31 @@
+# Vitis HLS build artifacts - DO NOT COMMIT
+hnsw_proj/
+unified_proj/
+*_proj/
+vitis_hls.log
+vitis_*.log
+*.aps
+*.funcunit
+*.directive
+
+# C simulation build artifacts
+csim/
+*.exe
+
+# Vitis HLS intermediate files
+.autopilot/
+.hls/
+
+# Editor
+.vscode/
+*.swp
+*.swo
+
+# HLS test project directories (generated during synthesis)
+adc_test_proj/
+topk_test_proj/
+hnsw_full_proj/
+ivfpq_full_proj/
+mixed_full_proj/
+unified_proj/
+acc_top_proj/

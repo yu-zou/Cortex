@@ -48,7 +48,7 @@ TEST(DriverABITest, ReadBeforeInit) {
 
     struct cortex_read_result r = cortex_semantic_read(
         0, dummy.data(), dummy.size(),
-        query.data(), 32, 5, CORTEX_METRIC_L2);
+        query.data(), 32, 5, CORTEX_METRIC_L2, CORTEX_MODE_IVFPQ);
 
     EXPECT_EQ(r.status, -EINVAL);
     EXPECT_EQ(r.count, 0u);
@@ -81,7 +81,7 @@ TEST(DriverABITest, FullLifecycle) {
 
     struct cortex_read_result r = cortex_semantic_read(
         0, blob.data(), blob.size(),
-        queries.data(), 32, 5, CORTEX_METRIC_L2);
+        queries.data(), 32, 5, CORTEX_METRIC_L2, CORTEX_MODE_IVFPQ);
     EXPECT_EQ(r.status, 0);
     EXPECT_GT(r.count, 0u);
 

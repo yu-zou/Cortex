@@ -69,7 +69,7 @@ TEST(SmartSSDDriverTest, SemanticReadGolden) {
     const float* q = queries.data();
     cortex_read_result result = driver.semantic_read(
         0, cluster_blob.data(), cluster_blob.size(),
-        q, query_dim, top_k, CORTEX_METRIC_L2);
+        q, query_dim, top_k, CORTEX_METRIC_L2, CORTEX_MODE_IVFPQ);
 
     EXPECT_EQ(result.status, 0);
     EXPECT_GT(result.count, 0u);
@@ -91,14 +91,14 @@ TEST(SmartSSDDriverTest, L2CacheHit) {
 
     cortex_read_result r1 = driver.semantic_read(
         0, cluster_blob.data(), cluster_blob.size(),
-        queries.data(), query_dim, top_k, CORTEX_METRIC_L2);
+        queries.data(), query_dim, top_k, CORTEX_METRIC_L2, CORTEX_MODE_IVFPQ);
     EXPECT_EQ(r1.status, 0);
 
     EXPECT_TRUE(driver.is_cluster_cached(0));
 
     cortex_read_result r2 = driver.semantic_read(
         0, cluster_blob.data(), cluster_blob.size(),
-        queries.data(), query_dim, top_k, CORTEX_METRIC_L2);
+        queries.data(), query_dim, top_k, CORTEX_METRIC_L2, CORTEX_MODE_IVFPQ);
     EXPECT_EQ(r2.status, 0);
     EXPECT_EQ(r1.count, r2.count);
 
@@ -121,16 +121,16 @@ TEST(SmartSSDDriverTest, L2CacheEviction) {
     const uint32_t top_k = 5;
 
     driver.semantic_read(0, blob0.data(), blob0.size(),
-        queries.data(), query_dim, top_k, CORTEX_METRIC_L2);
+        queries.data(), query_dim, top_k, CORTEX_METRIC_L2, CORTEX_MODE_IVFPQ);
     EXPECT_TRUE(driver.is_cluster_cached(0));
 
     driver.semantic_read(1, blob1.data(), blob1.size(),
-        queries.data(), query_dim, top_k, CORTEX_METRIC_L2);
+        queries.data(), query_dim, top_k, CORTEX_METRIC_L2, CORTEX_MODE_IVFPQ);
     EXPECT_TRUE(driver.is_cluster_cached(0));
     EXPECT_TRUE(driver.is_cluster_cached(1));
 
     driver.semantic_read(2, blob2.data(), blob2.size(),
-        queries.data(), query_dim, top_k, CORTEX_METRIC_L2);
+        queries.data(), query_dim, top_k, CORTEX_METRIC_L2, CORTEX_MODE_IVFPQ);
 
     EXPECT_TRUE(driver.is_cluster_cached(2));
     EXPECT_TRUE(driver.is_cluster_cached(1));
@@ -147,7 +147,7 @@ TEST(SmartSSDDriverTest, UninitializedDriverError) {
 
     cortex_read_result result = driver.semantic_read(
         0, dummy.data(), dummy.size(),
-        query.data(), 32, 5, CORTEX_METRIC_L2);
+        query.data(), 32, 5, CORTEX_METRIC_L2, CORTEX_MODE_IVFPQ);
 
     EXPECT_EQ(result.status, -EINVAL);
     EXPECT_EQ(result.count, 0u);
@@ -171,7 +171,7 @@ TEST(SmartSSDDriverTest, ThreadSafety) {
         threads.emplace_back([&]() {
             cortex_read_result r = driver.semantic_read(
                 0, cluster_blob.data(), cluster_blob.size(),
-                queries.data(), query_dim, top_k, CORTEX_METRIC_L2);
+                queries.data(), query_dim, top_k, CORTEX_METRIC_L2, CORTEX_MODE_IVFPQ);
             if (r.status != 0) errors.fetch_add(1);
         });
     }
