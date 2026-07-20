@@ -135,6 +135,16 @@ PQ_STREAM:
             ap_uint<64> src_byte = entry_off + by;
             beat.range(511 - by*8, 511 - by*8 - 7) = dram[pq_addr.to_uint64() + src_byte];
         }
+        // DM pre-extracts doc_addr/doc_len to save CE LUT
+        uint64_t da = 0;
+        for (int bi = 0; bi < 8; bi++) {
+            da |= ((uint64_t)beat.range(511 - (M_val + bi)*8, 511 - (M_val + bi)*8 - 7)) << (bi * 8);
+        }
+        uint32_t dl = 0;
+        for (int bi = 0; bi < 4; bi++) {
+            dl |= ((uint32_t)beat.range(511 - (M_val + 8 + bi)*8, 511 - (M_val + 8 + bi)*8 - 7)) << (bi * 8);
+        }
+        beat.range(95, 0) = ((ap_uint<96>)da << 32) | dl;
         pq_fifo.write(beat);
     }
 
@@ -316,23 +326,9 @@ PQ_PROCESS:
         // DM packs bytes from HIGH to LOW bits; reconstruct LE values.
         ap_uint<32> entry_bits = entry_bytes * 8;
 
-        // doc_addr: M_val bytes after PQ codes (bytes M_val..M_val+7)
-        ap_uint<64> doc_addr = 0;
-        for (int i = 0; i < 8; i++) {
-#pragma HLS UNROLL
-            doc_addr.range(i*8+7, i*8) = shifted.range(
-                entry_bits - M_val*8 - 1 - i*8,
-                entry_bits - M_val*8 - 8 - i*8);
-        }
-
-        // doc_len: 8 bytes after doc_addr, use lower 32 bits (bytes M+8..M+11)
-        ap_uint<32> doc_len = 0;
-        for (int i = 0; i < 4; i++) {
-#pragma HLS UNROLL
-            doc_len.range(i*8+7, i*8) = shifted.range(
-                entry_bits - M_val*8 - 64 - 1 - i*8,
-                entry_bits - M_val*8 - 64 - 8 - i*8);
-        }
+        // DM pre-extracted doc_addr/doc_len → read directly from low 96 bits
+        ap_uint<64> doc_addr = beat.range(95, 32);
+        ap_uint<32> doc_len  = beat.range(31, 0);
 
         // PQ codes: bytes 0..M_SYN-1 of entry (constant bound for unrolling)
         ap_uint<8> pq_codes[M_SYN];
