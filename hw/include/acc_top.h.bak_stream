@@ -34,9 +34,6 @@ typedef ap_uint<128>  result_word_t;
 typedef ap_uint<512>  cb_pq_word_t;
 typedef ap_uint<128>  res_word_t;
 
-// ─── AXI4-Stream result packet ───
-typedef ap_axiu<128, 1, 0, 0> axis_result_pkt_t;
-
 // ─── Metadata ───
 struct ComputeMeta {
     ap_uint<32>  m_actual;
@@ -63,8 +60,7 @@ void acc_top(
     ap_uint<1>   reload_codebook,
     volatile bool &done,
     volatile bool  start,
-    ap_uint<8>  *dram,
-    hls::stream<axis_result_pkt_t> &axis_result
+    ap_uint<8>  *dram
 );
 
 // ─── Sub-modules ───
@@ -91,7 +87,6 @@ void data_manager(
     hls::stream<cb_pq_word_t> &pq_fifo,
     hls::stream<float>        &query_fifo,
     hls::stream<res_word_t>   &res_fifo_in,
-    hls::stream<axis_result_pkt_t> &axis_result,
     ComputeMeta                &meta_out,
     volatile bool              &dm_done,
     volatile bool               dm_start,
