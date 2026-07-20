@@ -58,66 +58,15 @@ QRY_READ:
     meta_out.metric_id  = 0;
     // meta_out.search_mode removed — compute_engine is the only execution path
 
-    // ─── Pre-compute span/base for each sub-quantizer (serial, one-time) ───
-    ap_uint<32> span[M_SYN], base_arr[M_SYN];
-#pragma HLS ARRAY_PARTITION variable=span complete dim=1
-#pragma HLS ARRAY_PARTITION variable=base_arr complete dim=1
-    ap_uint<32> accum = 0;
-    for (int m = 0; m < M_SYN; m++) {
-#pragma HLS PIPELINE II=1
-        if (m < M_val) {
-            ap_uint<32> ks = KS;
-            span[m] = ks * Ds_val;
-            base_arr[m] = accum;
-            accum += span[m];
-        } else {
-            span[m] = 0;
-            base_arr[m] = 0;
-        }
-    }
-
-    // Step 4: Stream Codebook → FIFO_CB
-    // Compute [m][ks_idx][ds_idx] address in DM (serial 1 divider), pack into FIFO
-    // Format per float: m(5b)|ks_idx(8b)|ds_idx(4b)|val(32b) = 49b, 10 entries/beat
+    // Step 4: Stream Codebook → FIFO_CB (burst-optimized: full-beat reads)
     ap_uint<64> cb_addr = cs + 64;
-    ap_uint<32>* cb_ptr = (ap_uint<32>*)(dram + cb_addr.to_uint64());
+    ap_uint<512>* cb_beats_ptr = (ap_uint<512>*)(dram + cb_addr.to_uint64());
     if (reload_codebook) {
-        ap_uint<512> cb_beat = 0;
-        ap_uint<5> entry_cnt = 0;
-    CB_SERIAL:
-        for (ap_uint<32> gidx = 0; gidx < cb_bytes / 4; gidx++) {
+CB_STREAM:
+        for (ap_uint<32> b = 0; b < cb_beats; b++) {
 #pragma HLS PIPELINE II=1
-            ap_uint<32> raw = cb_ptr[gidx];
-            // Serial: find m, compute ks_idx = rem/Ds_val, ds_idx = rem%Ds_val
-            ap_uint<5> m_out = 0;
-            ap_uint<8> k_out = 0;
-            ap_uint<4> d_out = 0;
-        FIND_M:
-            for (int m = 0; m < M_SYN; m++) {
-#pragma HLS UNROLL
-                if (m < M_val && gidx >= base_arr[m] && gidx < base_arr[m] + span[m]) {
-                    ap_uint<32> rem_val = gidx - base_arr[m];
-                    m_out = m;
-                    k_out = rem_val / Ds_val;
-                    d_out = rem_val % Ds_val;
-                }
-            }
-            // Pack: m[4:0] | ks_idx[7:0] | ds_idx[3:0] | val[31:0] → 49 bit
-            ap_uint<49> entry = ((ap_uint<49>)m_out << 44) |
-                                ((ap_uint<49>)k_out << 36) |
-                                ((ap_uint<49>)d_out << 32) |
-                                raw;
-            ap_uint<10> pos = entry_cnt * 49;
-            cb_beat.range(pos + 48, pos) = entry;
-            entry_cnt++;
-            if (entry_cnt == 10) {
-                cb_fifo.write(cb_beat);
-                cb_beat = 0;
-                entry_cnt = 0;
-            }
-        }
-        if (entry_cnt > 0) {
-            cb_fifo.write(cb_beat);
+            cb_pq_word_t beat = cb_beats_ptr[b];
+            cb_fifo.write(beat);
         }
     }
 
@@ -249,13 +198,12 @@ QRY_LOAD:
         query[i] = query_fifo.read();
     }
 
-    // Stage 0: Load Codebook — pre-computed addresses from DM, direct BRAM write
+    // Stage 0: Load Codebook
     ap_uint<32> cb_total = M_val * KS * Ds_val;
     ap_uint<32> cb_beats = (cb_total * 4 + 63) / 64;
 
 CB_LOAD:
     if (reload_codebook) {
-        // Zero initialize BRAM
     CB_ZERO_M:
         for (int m = 0; m < M_SYN; m++) {
         CB_ZERO_K:
@@ -268,19 +216,30 @@ CB_LOAD:
             }
         }
 
-        // Direct write: each 512b beat holds 10 entries of (m,k,d,val)
         for (ap_uint<32> b = 0; b < cb_beats; b++) {
 #pragma HLS PIPELINE II=1
-            cb_pq_word_t cb_beat = cb_fifo.read();
-            for (int e = 0; e < 10; e++) {
+            cb_pq_word_t beat = cb_fifo.read();
+            for (int f = 0; f < 16; f++) {
 #pragma HLS UNROLL
-                ap_uint<10> pos = e * 49;
-                ap_uint<5>  m_out = cb_beat.range(pos + 48, pos + 44);
-                ap_uint<8>  k_out = cb_beat.range(pos + 43, pos + 36);
-                ap_uint<4>  d_out = cb_beat.range(pos + 35, pos + 32);
-                ap_uint<32> val   = cb_beat.range(pos + 31, pos);
-                if (m_out < M_val) {
-                    codebook[m_out][k_out][d_out] = *((float*)&val);
+                ap_uint<32> gidx = b * 16 + f;
+                if (gidx < cb_total) {
+                    ap_uint<32> raw   = beat.range(32*f+31, 32*f);
+                    float        val  = *((float*)&raw);
+                    ap_uint<32> base = 0;
+                CB_MAP_M:
+                    for (int m = 0; m < M_SYN; m++) {
+#pragma HLS UNROLL
+                        ap_uint<32> span = KS * Ds_val;
+                        if (m < M_val && gidx >= base && gidx < base + span) {
+                            ap_uint<32> rem    = gidx - base;
+                            ap_uint<32> ks_idx = rem / Ds_val;
+                            ap_uint<32> ds_idx = rem % Ds_val;
+                            codebook[m][ks_idx][ds_idx] = val;
+                        }
+                        if (m < M_val) {
+                            base += span;
+                        }
+                    }
                 }
             }
         }

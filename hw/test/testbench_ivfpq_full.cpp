@@ -293,6 +293,7 @@ int main() {
         fifo_res,               // res_fifo_out (output: Top-K results)
         fifo_qry,               // query_fifo (input: query from DM)
         meta,                   // meta_in (from DM output)
+        reload_codebook,        // reload_codebook
         comp_done,              // done flag
         comp_start              // start flag
     );

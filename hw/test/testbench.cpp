@@ -113,7 +113,7 @@ int main() {
     // ─── Run compute_engine ───
     cout << "\n=== Running Compute Engine ===" << endl;
     volatile bool cd=false, cs=true;
-    compute_engine(fc,fp,fr,fq,meta,cd,cs);
+    compute_engine(fc,fp,fr,fq,meta,1,cd,cs);
 
     if(!cd){cerr<<"Compute failed\n";return 1;}
 
