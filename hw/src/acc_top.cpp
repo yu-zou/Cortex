@@ -23,7 +23,7 @@ void data_manager(
     ap_uint<8>                *dram
 ) {
 #pragma HLS INTERFACE m_axi port=dram depth=1048576 offset=direct
-#pragma HLS INTERFACE ap_ctrl_none port=return
+#pragma HLS INTERFACE ap_ctrl_hs port=return
     dm_done = false;
     if (!dm_start) return;
 
@@ -242,7 +242,7 @@ void compute_engine(
     volatile bool              &comp_done,
     volatile bool               comp_start
 ) {
-#pragma HLS INTERFACE ap_ctrl_none port=return
+#pragma HLS INTERFACE ap_ctrl_hs port=return
     comp_done = false;
     if (!comp_start) return;
 
@@ -507,19 +507,21 @@ void acc_top(
     done = dm_done && comp_done;
 #else
     // ─── Synthesis: DATAFLOW ───
-// Sequential execution (DATAFLOW pragma removed for synthesis compatibility)
     control_fsm(cluster_start_addr, query_ddr_addr,
                 top_k, metric_id, reload_codebook,
                 done, start, dm_start, dm_done,
                 comp_start, comp_done);
 
+#pragma HLS DATAFLOW disable_start_propagation
+    {
         data_manager(cluster_start_addr, query_ddr_addr, result_ddr_addr,
                      reload_codebook,
                      fifo_cb, fifo_pq, fifo_qry, fifo_res,
                      axis_result, meta, dm_done, dm_start, dram);
 
-    compute_engine(fifo_cb, fifo_pq, fifo_res, fifo_qry,
-                   meta, reload_codebook, comp_done, comp_start);
+        compute_engine(fifo_cb, fifo_pq, fifo_res, fifo_qry,
+                       meta, reload_codebook, comp_done, comp_start);
+    }
 #endif
 }
 
