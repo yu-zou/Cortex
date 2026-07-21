@@ -59,9 +59,6 @@ QRY_READ:
     meta_out.metric_id  = 0;
     // meta_out.search_mode removed — compute_engine is the only execution path
 
-    // Pre-compute per-sub-quantizer size (uniform KS=256)
-    ap_uint<32> per_m = KS * Ds_val;  // 256 * Ds_val
-
     // Step 4: Stream Codebook → FIFO_CB
     // Use 512-bit aligned burst reads. Each beat = 16 FP32 floats.
     // Codebook layout: [m=0][k=0..255][d=0..Ds-1], [m=1][k=0..255][d=0..Ds-1], ...
@@ -70,36 +67,14 @@ QRY_READ:
     //   rem = gidx % per_m  →  gidx & 0x7FF
     //   k   = rem / Ds_val  →  rem >> 3
     //   d   = rem % Ds_val  →  rem & 0x7
+    // Step 4: Stream Codebook → FIFO_CB (raw 16 FP32 floats per beat, sequential)
     ap_uint<64> cb_addr = cs + 64;
-    ap_uint<32>* cb_ptr = (ap_uint<32>*)(dram + cb_addr.to_uint64());
+    ap_uint<512>* cb_beats_ptr = (ap_uint<512>*)(dram + cb_addr.to_uint64());
     if (reload_codebook) {
-        ap_uint<512> cb_beat = 0;
-        ap_uint<5> entry_cnt = 0;
-    CB_SERIAL:
-        for (ap_uint<32> gidx = 0; gidx < cb_bytes / 4; gidx++) {
+    CB_STREAM:
+        for (ap_uint<32> b = 0; b < cb_beats; b++) {
 #pragma HLS PIPELINE II=1
-            ap_uint<32> raw = cb_ptr[gidx];
-            // Power-of-2 address calculation (zero division logic)
-            ap_uint<5>  m_out  = gidx >> 11;        // gidx / 2048 (per_m = 256*8)
-            ap_uint<32> rem    = gidx & 0x7FF;      // gidx % 2048
-            ap_uint<8>  k_out  = rem >> 3;           // rem / 8 (Ds_val)
-            ap_uint<4>  d_out  = rem & 0x7;          // rem % 8
-            // Pack: m[4:0] | ks_idx[7:0] | ds_idx[3:0] | val[31:0] → 49 bit
-            ap_uint<49> entry = ((ap_uint<49>)m_out << 44) |
-                                ((ap_uint<49>)k_out << 36) |
-                                ((ap_uint<49>)d_out << 32) |
-                                raw;
-            ap_uint<10> pos = entry_cnt * 49;
-            cb_beat.range(pos + 48, pos) = entry;
-            entry_cnt++;
-            if (entry_cnt == 10) {
-                cb_fifo.write(cb_beat);
-                cb_beat = 0;
-                entry_cnt = 0;
-            }
-        }
-        if (entry_cnt > 0) {
-            cb_fifo.write(cb_beat);
+            cb_fifo.write(cb_beats_ptr[b]);
         }
     }
 
@@ -306,27 +281,33 @@ QRY_LOAD:
         query[i] = query_fifo.read();
     }
 
-    // Stage 0: Load Codebook — pre-computed addresses from DM, direct BRAM write
+    // Stage 0: Load Codebook — sequential float stream, compute address from counter
     ap_uint<32> cb_total = M_val * KS * Ds_val;
     ap_uint<32> cb_beats = (cb_total * 4 + 63) / 64;
 
 CB_LOAD:
     if (reload_codebook) {
-        // Direct write: each 512b beat holds 10 entries of (m,k,d,val)
+        ap_uint<32> counter = 0;
         for (ap_uint<32> b = 0; b < cb_beats; b++) {
 #pragma HLS PIPELINE II=1
-            cb_pq_word_t cb_beat = cb_fifo.read();
-            for (int e = 0; e < 10; e++) {
+            cb_pq_word_t beat = cb_fifo.read();
+            for (int f = 0; f < 16; f++) {
 #pragma HLS UNROLL
-                ap_uint<10> pos = e * 49;
-                ap_uint<5>  m_out = cb_beat.range(pos + 48, pos + 44);
-                ap_uint<8>  k_out = cb_beat.range(pos + 43, pos + 36);
-                ap_uint<4>  d_out = cb_beat.range(pos + 35, pos + 32);
-                ap_uint<32> val   = cb_beat.range(pos + 31, pos);
-                if (m_out < M_val) {
-                    codebook[m_out][k_out][d_out] = *((float*)&val);
+                ap_uint<32> gidx = counter + f;
+                if (gidx < cb_total) {
+                    ap_uint<32> raw = beat.range(32*f+31, 32*f);
+                    float val = *((float*)&raw);
+                    // Power-of-2 address: m = gidx>>11, rem = gidx&0x7FF, k = rem>>3, d = rem&0x7
+                    ap_uint<5>  m_addr  = gidx >> 11;
+                    ap_uint<32> rem     = gidx & 0x7FF;
+                    ap_uint<8>  k_addr  = rem >> 3;
+                    ap_uint<4>  d_addr  = rem & 0x7;
+                    if (m_addr < M_val) {
+                        codebook[m_addr][k_addr][d_addr] = val;
+                    }
                 }
             }
+            counter += 16;
         }
     }
 
