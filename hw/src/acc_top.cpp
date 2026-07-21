@@ -184,25 +184,29 @@ float sub_dist_l2(float q, float c) {
     return d * d;
 }
 
-// Systolic Top-K: fully unrolled chain of TOPK_MAX independent cells.
-// Uses integer comparison on FP32 bit patterns for non-negative L2 distances.
-// This saves ~100 LUTs per cell vs float comparison.
-void systolic_topk_insert(
+// Systolic Top-K: 2-level banked architecture
+// Level 0: N banks of TOPK_BANK_SIZE=16 cells each, fully unrolled per bank
+// Level 1: Merge all banks into global Top-K
+// Banks = ceil(TOPK_MAX / TOPK_BANK_SIZE) = 32
+// Total cells at Level 0: 32 x 16 = 512 (vs 500 in monolithic)
+// Critical path: 16 comparators (vs 500) — timing closure at 200MHz+
+
+static const int BANKS = (TOPK_MAX + TOPK_BANK_SIZE - 1) / TOPK_BANK_SIZE;  // 32
+
+void systolic_topk_insert_bank(
     float        cand_dist,
     ap_uint<64>  cand_addr,
     ap_uint<32>  cand_len,
-    TopKCell     cells[TOPK_MAX]
+    TopKCell     cells[TOPK_BANK_SIZE]
 ) {
 #pragma HLS INLINE
 #pragma HLS ARRAY_PARTITION variable=cells complete dim=1
-
     float        cd_float = cand_dist;
     ap_uint<32>  cd_int   = *((ap_uint<32>*)&cand_dist);
     ap_uint<64>  ca = cand_addr;
     ap_uint<32>  cl = cand_len;
-
-SYSTOLIC_CHAIN:
-    for (int i = 0; i < TOPK_MAX; i++) {
+BANK_CHAIN:
+    for (int i = 0; i < TOPK_BANK_SIZE; i++) {
 #pragma HLS UNROLL
         ap_uint<32> cell_int = *((ap_uint<32>*)&cells[i].best_dist);
         if (cd_int < cell_int) {
@@ -216,6 +220,38 @@ SYSTOLIC_CHAIN:
             cd_int   = *((ap_uint<32>*)&td);
             ca = ta;
             cl = tl;
+        }
+    }
+}
+
+// Level 1: Merge 32 sorted banks into global Top-500
+// Simple approach: collect all bank entries, sort, keep top TOPK_MAX
+static void merge_banks_to_global(
+    TopKCell banks[BANKS][TOPK_BANK_SIZE],
+    TopKCell global[TOPK_MAX]
+) {
+    // Flatten banks into global array (banks are already sorted within each bank)
+    int idx = 0;
+MERGE_FLATTEN:
+    for (int b = 0; b < BANKS; b++) {
+        for (int i = 0; i < TOPK_BANK_SIZE && idx < TOPK_MAX; i++) {
+#pragma HLS PIPELINE II=1
+            global[idx++] = banks[b][i];
+        }
+    }
+    // Sort global by distance (bubble sort — small enough for HW, data-dependent but only runs once)
+MERGE_SORT:
+    for (int i = 0; i < TOPK_MAX; i++) {
+#pragma HLS PIPELINE II=1
+        for (int j = 0; j < TOPK_MAX - 1 - i; j++) {
+#pragma HLS UNROLL factor=1  // Serial comparison, don't blow up LUT
+            ap_uint<32> a_int = *((ap_uint<32>*)&global[j].best_dist);
+            ap_uint<32> b_int = *((ap_uint<32>*)&global[j+1].best_dist);
+            if (a_int > b_int) {
+                TopKCell tmp = global[j];
+                global[j] = global[j+1];
+                global[j+1] = tmp;
+            }
         }
     }
 }
@@ -282,15 +318,17 @@ CB_LOAD:
 
 
 
-    // Stage 1: Top-K Init
-    TopKCell cells[TOPK_MAX];
-#pragma HLS ARRAY_PARTITION variable=cells complete dim=1
+    // Stage 1: Top-K Init (banked)
+    TopKCell banks[BANKS][TOPK_BANK_SIZE];
+#pragma HLS ARRAY_PARTITION variable=banks complete dim=2
 TK_INIT:
-    for (int i = 0; i < TOPK_MAX; i++) {
-#pragma HLS UNROLL
-        cells[i].best_dist = 3.402823466e+38f;
-        cells[i].best_addr = 0;
-        cells[i].best_len  = 0;
+    for (int b = 0; b < BANKS; b++) {
+        for (int i = 0; i < TOPK_BANK_SIZE; i++) {
+#pragma HLS PIPELINE II=1
+            banks[b][i].best_dist = 3.402823466e+38f;
+            banks[b][i].best_addr = 0;
+            banks[b][i].best_len  = 0;
+        }
     }
 
     // Stage 2-4: Main Processing
@@ -348,9 +386,15 @@ PQ_PROCESS:
             }
         }
 
-        // Stage 4: Systolic Top-K
-        systolic_topk_insert(total_dist, doc_addr, doc_len, cells);
+        // Stage 4: Systolic Top-K (banked, round-robin)
+        int bank_id = n % BANKS;
+        systolic_topk_insert_bank(total_dist, doc_addr, doc_len, banks[bank_id]);
     }
+
+    // Merge banks into global Top-500
+    TopKCell cells[TOPK_MAX];
+#pragma HLS ARRAY_PARTITION variable=cells complete dim=1
+    merge_banks_to_global(banks, cells);
 
     // Stage 5: Push Results → FIFO_RES
 RESULT_PUSH:
