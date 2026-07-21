@@ -144,17 +144,15 @@ PQ_STREAM:
     // Results pushed by compute_engine Stage 5, written by DM to DRAM for ARM.
     // Format: TOPK_MAX × 128-bit [dist(32b) | doc_addr(64b) | doc_len(32b)]
 #ifdef __SYNTHESIS__
-    ap_uint<32>* res_ptr = (ap_uint<32>*)(dram + result_ddr_addr.to_uint64());
+    ap_uint<128>* res128_ptr = (ap_uint<128>*)(dram + result_ddr_addr.to_uint64());
+    (void)res128_ptr;  // Used in RESULT_WRITE loop
 #endif
 RESULT_WRITE:
     for (ap_uint<32> i = 0; i < TOPK_MAX; i++) {
 #pragma HLS PIPELINE II=1
         res_word_t entry = res_fifo_in.read();
 #ifdef __SYNTHESIS__
-        res_ptr[i * 4 + 0] = entry.range(31, 0);     // dist (FP32)
-        res_ptr[i * 4 + 1] = entry.range(63, 32);     // doc_addr low 32b
-        res_ptr[i * 4 + 2] = entry.range(95, 64);     // doc_addr high 32b
-        res_ptr[i * 4 + 3] = entry.range(127, 96);    // doc_len
+        res128_ptr[i] = entry;
 #endif
         // Write to AXI4-Stream (parallel to DDR4 write)
         axis_result_pkt_t axis_pkt;
@@ -225,32 +223,48 @@ BANK_CHAIN:
 }
 
 // Level 1: Merge 32 sorted banks into global Top-500
-// Simple approach: collect all bank entries, sort, keep top TOPK_MAX
+// Simple approach: flatten banks into global, keep min-heap like insertion
 static void merge_banks_to_global(
     TopKCell banks[BANKS][TOPK_BANK_SIZE],
     TopKCell global[TOPK_MAX]
 ) {
-    // Flatten banks into global array (banks are already sorted within each bank)
-    int idx = 0;
-MERGE_FLATTEN:
-    for (int b = 0; b < BANKS; b++) {
-        for (int i = 0; i < TOPK_BANK_SIZE && idx < TOPK_MAX; i++) {
-#pragma HLS PIPELINE II=1
-            global[idx++] = banks[b][i];
-        }
-    }
-    // Sort global by distance (bubble sort — small enough for HW, data-dependent but only runs once)
-MERGE_SORT:
+    // Initialize global with FP32_MAX
+MERGE_INIT:
     for (int i = 0; i < TOPK_MAX; i++) {
 #pragma HLS PIPELINE II=1
-        for (int j = 0; j < TOPK_MAX - 1 - i; j++) {
-#pragma HLS UNROLL factor=1  // Serial comparison, don't blow up LUT
-            ap_uint<32> a_int = *((ap_uint<32>*)&global[j].best_dist);
-            ap_uint<32> b_int = *((ap_uint<32>*)&global[j+1].best_dist);
-            if (a_int > b_int) {
-                TopKCell tmp = global[j];
-                global[j] = global[j+1];
-                global[j+1] = tmp;
+        global[i].best_dist = 3.402823466e+38f;
+        global[i].best_addr = 0;
+        global[i].best_len  = 0;
+    }
+    
+    // Flatten banks: insert each entry into global using systolic insertion
+    // (reuses the same pattern as the bank chain — small and efficient)
+MERGE_FLATTEN:
+    for (int b = 0; b < BANKS; b++) {
+        for (int i = 0; i < TOPK_BANK_SIZE; i++) {
+#pragma HLS PIPELINE II=1
+            TopKCell cand = banks[b][i];
+            // Re-use systolic insertion pattern: insert into global
+            float        cd_float = cand.best_dist;
+            ap_uint<32>  cd_int   = *((ap_uint<32>*)&cand.best_dist);
+            ap_uint<64>  ca = cand.best_addr;
+            ap_uint<32>  cl = cand.best_len;
+        MERGE_INSERT:
+            for (int j = 0; j < TOPK_MAX; j++) {
+#pragma HLS UNROLL factor=4  // Partial unroll: 125 iterations (500/4)
+                ap_uint<32> cell_int = *((ap_uint<32>*)&global[j].best_dist);
+                if (cd_int < cell_int) {
+                    float        td = global[j].best_dist;
+                    ap_uint<64>  ta = global[j].best_addr;
+                    ap_uint<32>  tl = global[j].best_len;
+                    global[j].best_dist = cd_float;
+                    global[j].best_addr = ca;
+                    global[j].best_len  = cl;
+                    cd_float = td;
+                    cd_int   = *((ap_uint<32>*)&td);
+                    ca = ta;
+                    cl = tl;
+                }
             }
         }
     }
