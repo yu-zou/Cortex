@@ -59,27 +59,17 @@ QRY_READ:
     meta_out.metric_id  = 0;
     // meta_out.search_mode removed — compute_engine is the only execution path
 
-    // ─── Pre-compute span/base for each sub-quantizer (serial, one-time) ───
-    ap_uint<32> span[M_SYN], base_arr[M_SYN];
-#pragma HLS ARRAY_PARTITION variable=span complete dim=1
-#pragma HLS ARRAY_PARTITION variable=base_arr complete dim=1
-    ap_uint<32> accum = 0;
-    for (int m = 0; m < M_SYN; m++) {
-#pragma HLS PIPELINE II=1
-        if (m < M_val) {
-            ap_uint<32> ks = KS;
-            span[m] = ks * Ds_val;
-            base_arr[m] = accum;
-            accum += span[m];
-        } else {
-            span[m] = 0;
-            base_arr[m] = 0;
-        }
-    }
+    // Pre-compute per-sub-quantizer size (uniform KS=256)
+    ap_uint<32> per_m = KS * Ds_val;  // 256 * Ds_val
 
     // Step 4: Stream Codebook → FIFO_CB
-    // Compute [m][ks_idx][ds_idx] address in DM (serial 1 divider), pack into FIFO
-    // Format per float: m(5b)|ks_idx(8b)|ds_idx(4b)|val(32b) = 49b, 10 entries/beat
+    // Use 512-bit aligned burst reads. Each beat = 16 FP32 floats.
+    // Codebook layout: [m=0][k=0..255][d=0..Ds-1], [m=1][k=0..255][d=0..Ds-1], ...
+    // POWER-OF-2 optimization: per_m = 256*8=2048, Ds_val=8
+    //   m   = gidx / per_m  →  gidx >> 11
+    //   rem = gidx % per_m  →  gidx & 0x7FF
+    //   k   = rem / Ds_val  →  rem >> 3
+    //   d   = rem % Ds_val  →  rem & 0x7
     ap_uint<64> cb_addr = cs + 64;
     ap_uint<32>* cb_ptr = (ap_uint<32>*)(dram + cb_addr.to_uint64());
     if (reload_codebook) {
@@ -89,20 +79,11 @@ QRY_READ:
         for (ap_uint<32> gidx = 0; gidx < cb_bytes / 4; gidx++) {
 #pragma HLS PIPELINE II=1
             ap_uint<32> raw = cb_ptr[gidx];
-            // Serial: find m, compute ks_idx = rem/Ds_val, ds_idx = rem%Ds_val
-            ap_uint<5> m_out = 0;
-            ap_uint<8> k_out = 0;
-            ap_uint<4> d_out = 0;
-        FIND_M:
-            for (int m = 0; m < M_SYN; m++) {
-#pragma HLS UNROLL
-                if (m < M_val && gidx >= base_arr[m] && gidx < base_arr[m] + span[m]) {
-                    ap_uint<32> rem_val = gidx - base_arr[m];
-                    m_out = m;
-                    k_out = rem_val / Ds_val;
-                    d_out = rem_val % Ds_val;
-                }
-            }
+            // Power-of-2 address calculation (zero division logic)
+            ap_uint<5>  m_out  = gidx >> 11;        // gidx / 2048 (per_m = 256*8)
+            ap_uint<32> rem    = gidx & 0x7FF;      // gidx % 2048
+            ap_uint<8>  k_out  = rem >> 3;           // rem / 8 (Ds_val)
+            ap_uint<4>  d_out  = rem & 0x7;          // rem % 8
             // Pack: m[4:0] | ks_idx[7:0] | ds_idx[3:0] | val[31:0] → 49 bit
             ap_uint<49> entry = ((ap_uint<49>)m_out << 44) |
                                 ((ap_uint<49>)k_out << 36) |
@@ -122,28 +103,35 @@ QRY_READ:
         }
     }
 
-    // Step 5: Stream PQ Codes → FIFO_PQ
-    // Byte-level reads preserve LE byte order for compute_engine's right-align logic
+    // Step 5: Stream PQ Codes → FIFO_PQ (512-bit aligned burst reads)
     ap_uint<64> pq_addr = cs + 64 + cb_bytes;
     ap_uint<32> entry_bytes = M_val + 16;
+    ap_uint<512>* pq_beats_ptr = (ap_uint<512>*)(dram + pq_addr.to_uint64());
 PQ_STREAM:
     for (ap_uint<32> n = 0; n < N_val; n++) {
 #pragma HLS PIPELINE II=1
         cb_pq_word_t beat = 0;
-        ap_uint<64> entry_off = n.to_uint64() * entry_bytes;
-        for (int by = 0; by < 64 && by < entry_bytes; by++) {
-#pragma HLS UNROLL
-            ap_uint<64> src_byte = entry_off + by;
-            beat.range(511 - by*8, 511 - by*8 - 7) = dram[pq_addr.to_uint64() + src_byte];
-        }
-        // DM pre-extracts doc_addr/doc_len to save CE LUT
+        ap_uint<32> beat_idx = (n * entry_bytes) / 64;
+        beat = pq_beats_ptr[beat_idx];
+        
+        // Pre-extract doc_addr/doc_len from beat's known byte positions
+        // PQ entry layout (LE byte order at HIGH bits of beat):
+        //   bytes 0..M_val-1: PQ codes
+        //   bytes M_val..M_val+7: doc_addr (8 bytes, LE)
+        //   bytes M_val+8..M_val+11: doc_len (4 bytes low, LE)
+        ap_uint<32> entry_bits = entry_bytes * 8;
+        
+        // doc_addr: located at bits [entry_bits-M_val*8-1 : entry_bits-(M_val+8)*8]
         uint64_t da = 0;
         for (int bi = 0; bi < 8; bi++) {
-            da |= ((uint64_t)beat.range(511 - (M_val + bi)*8, 511 - (M_val + bi)*8 - 7)) << (bi * 8);
+            da |= ((uint64_t)beat.range(entry_bits - M_val*8 - 1 - bi*8,
+                                         entry_bits - M_val*8 - 8 - bi*8)) << (bi * 8);
         }
+        // doc_len: located at bits [entry_bits-(M_val+8)*8-1 : entry_bits-(M_val+12)*8]
         uint32_t dl = 0;
         for (int bi = 0; bi < 4; bi++) {
-            dl |= ((uint32_t)beat.range(511 - (M_val + 8 + bi)*8, 511 - (M_val + 8 + bi)*8 - 7)) << (bi * 8);
+            dl |= ((uint32_t)beat.range(entry_bits - (M_val+8)*8 - 1 - bi*8,
+                                         entry_bits - (M_val+8)*8 - 8 - bi*8)) << (bi * 8);
         }
         beat.range(95, 0) = ((ap_uint<96>)da << 32) | dl;
         pq_fifo.write(beat);
