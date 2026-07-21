@@ -262,19 +262,6 @@ QRY_LOAD:
 
 CB_LOAD:
     if (reload_codebook) {
-        // Zero initialize BRAM
-    CB_ZERO_M:
-        for (int m = 0; m < M_SYN; m++) {
-        CB_ZERO_K:
-            for (int k = 0; k < KS; k++) {
-            CB_ZERO_D:
-                for (int d = 0; d < DS_SYN; d++) {
-#pragma HLS PIPELINE II=1
-                    codebook[m][k][d] = 0.0f;
-                }
-            }
-        }
-
         // Direct write: each 512b beat holds 10 entries of (m,k,d,val)
         for (ap_uint<32> b = 0; b < cb_beats; b++) {
 #pragma HLS PIPELINE II=1
