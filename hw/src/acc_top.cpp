@@ -96,19 +96,19 @@ PQ_STREAM:
         //   bytes 0..M_val-1: PQ codes
         //   bytes M_val..M_val+7: doc_addr (8 bytes, LE)
         //   bytes M_val+8..M_val+11: doc_len (4 bytes low, LE)
-        ap_uint<32> entry_bits = entry_bytes * 8;
-        
-        // doc_addr: located at bits [entry_bits-M_val*8-1 : entry_bits-(M_val+8)*8]
+        // doc_addr: 8 bytes starting at entry byte M_val
+        // entry byte M_val+bi → beat bits [511-(M_val+bi)*8 : 511-(M_val+bi)*8-7]
         uint64_t da = 0;
         for (int bi = 0; bi < 8; bi++) {
-            da |= ((uint64_t)beat.range(entry_bits - M_val*8 - 1 - bi*8,
-                                         entry_bits - M_val*8 - 8 - bi*8)) << (bi * 8);
+            da |= ((uint64_t)beat.range(511 - (M_val + bi)*8,
+                                        511 - (M_val + bi)*8 - 7)) << (bi * 8);
         }
-        // doc_len: located at bits [entry_bits-(M_val+8)*8-1 : entry_bits-(M_val+12)*8]
+        // doc_len: 4 bytes starting at entry byte M_val+8
+        // entry byte M_val+8+bi → beat bits [511-(M_val+8+bi)*8 : 511-(M_val+8+bi)*8-7]
         uint32_t dl = 0;
         for (int bi = 0; bi < 4; bi++) {
-            dl |= ((uint32_t)beat.range(entry_bits - (M_val+8)*8 - 1 - bi*8,
-                                         entry_bits - (M_val+8)*8 - 8 - bi*8)) << (bi * 8);
+            dl |= ((uint32_t)beat.range(511 - (M_val + 8 + bi)*8,
+                                        511 - (M_val + 8 + bi)*8 - 7)) << (bi * 8);
         }
         beat.range(95, 0) = ((ap_uint<96>)da << 32) | dl;
         pq_fifo.write(beat);
