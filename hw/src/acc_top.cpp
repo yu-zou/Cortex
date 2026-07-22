@@ -12,6 +12,7 @@ void data_manager(
     ap_uint<64>                query_ddr_addr,
     ap_uint<64>                result_ddr_addr,
     ap_uint<1>                 reload_codebook,
+    ap_uint<32>                top_k,
     hls::stream<cb_pq_word_t> &cb_fifo,
     hls::stream<cb_pq_word_t> &pq_fifo,
     hls::stream<float>        &query_fifo,
@@ -55,7 +56,7 @@ QRY_READ:
     meta_out.m_actual   = M_val;
     meta_out.dim_actual = DIM_val;
     meta_out.n_vectors  = N_val;
-    meta_out.top_k      = TOPK_MAX;
+    meta_out.top_k      = top_k;
     meta_out.metric_id  = 0;
     // meta_out.search_mode removed — compute_engine is the only execution path
 
@@ -122,8 +123,9 @@ PQ_STREAM:
     ap_uint<128>* res128_ptr = (ap_uint<128>*)(dram + result_ddr_addr.to_uint64());
     (void)res128_ptr;  // Used in RESULT_WRITE loop
 #endif
+    ap_uint<32> push_count = (top_k > 0 && top_k <= TOPK_MAX) ? top_k : TOPK_MAX;
 RESULT_WRITE:
-    for (ap_uint<32> i = 0; i < TOPK_MAX; i++) {
+    for (ap_uint<32> i = 0; i < push_count; i++) {
 #pragma HLS PIPELINE II=1
         res_word_t entry = res_fifo_in.read();
 #ifdef __SYNTHESIS__
@@ -132,7 +134,7 @@ RESULT_WRITE:
         // Write to AXI4-Stream (parallel to DDR4 write)
         axis_result_pkt_t axis_pkt;
         axis_pkt.data = entry;
-        axis_pkt.last = (i == TOPK_MAX - 1) ? 1 : 0;
+        axis_pkt.last = (i == push_count - 1) ? 1 : 0;
         axis_pkt.keep = -1;
         axis_result.write(axis_pkt);
     }
@@ -226,7 +228,7 @@ MERGE_FLATTEN:
             ap_uint<32>  cl = cand.best_len;
         MERGE_INSERT:
             for (int j = 0; j < TOPK_MAX; j++) {
-#pragma HLS UNROLL factor=4  // Partial unroll: 125 iterations (500/4)
+#pragma HLS PIPELINE II=1
                 ap_uint<32> cell_int = *((ap_uint<32>*)&global[j].best_dist);
                 if (cd_int < cell_int) {
                     float        td = global[j].best_dist;
@@ -251,6 +253,7 @@ void compute_engine(
     hls::stream<res_word_t>   &res_fifo_out,
     hls::stream<float>        &query_fifo,
     ComputeMeta                 meta_in,
+    ap_uint<32>                 top_k,
     ap_uint<1>                  reload_codebook,
     volatile bool              &comp_done,
     volatile bool               comp_start
@@ -392,8 +395,9 @@ PQ_PROCESS:
     merge_banks_to_global(banks, cells);
 
     // Stage 5: Push Results → FIFO_RES
+    ap_uint<32> push_count = (top_k > 0 && top_k <= TOPK_MAX) ? top_k : TOPK_MAX;
 RESULT_PUSH:
-    for (int i = 0; i < TOPK_MAX; i++) {
+    for (ap_uint<32> i = 0; i < push_count; i++) {
 #pragma HLS PIPELINE II=1
         res_word_t result = 0;
         ap_uint<32> dist_bits = *((ap_uint<32>*)&cells[i].best_dist);
@@ -509,14 +513,14 @@ void acc_top(
     // ─── C Simulation: sequential execution ───
     // Step 1: Data Manager (INPUT: DRAM→FIFOs, OUTPUT: res_fifo_in→DRAM)
     dm_start = true;
-    data_manager(cluster_start_addr, query_ddr_addr, result_ddr_addr, reload_codebook,
+    data_manager(cluster_start_addr, query_ddr_addr, result_ddr_addr, reload_codebook, top_k,
                  fifo_cb, fifo_pq, fifo_qry, fifo_res,
                  axis_result, meta, dm_done, dm_start, dram);
 
     // Step 2: compute_engine is the only execution path
     comp_start = true;
     compute_engine(fifo_cb, fifo_pq, fifo_res, fifo_qry,
-                   meta, reload_codebook, comp_done, comp_start);
+                   meta, top_k, reload_codebook, comp_done, comp_start);
 
     done = dm_done && comp_done;
 #else
@@ -529,12 +533,12 @@ void acc_top(
 #pragma HLS DATAFLOW disable_start_propagation
     {
         data_manager(cluster_start_addr, query_ddr_addr, result_ddr_addr,
-                     reload_codebook,
+                     reload_codebook, top_k,
                      fifo_cb, fifo_pq, fifo_qry, fifo_res,
                      axis_result, meta, dm_done, dm_start, dram);
 
         compute_engine(fifo_cb, fifo_pq, fifo_res, fifo_qry,
-                       meta, reload_codebook, comp_done, comp_start);
+                       meta, top_k, reload_codebook, comp_done, comp_start);
     }
 #endif
 }
