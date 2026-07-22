@@ -57,7 +57,7 @@ QRY_READ:
     meta_out.dim_actual = DIM_val;
     meta_out.n_vectors  = N_val;
     meta_out.top_k      = top_k;
-    meta_out.metric_id  = 0;
+    // meta_out.metric_id set by acc_top before calling data_manager
     // meta_out.search_mode removed — compute_engine is the only execution path
 
     // Step 4: Stream Codebook → FIFO_CB
@@ -508,6 +508,12 @@ void acc_top(
     volatile bool comp_done  = false;
 
     ComputeMeta meta;
+    // ComputeMeta carries runtime parameters from Host (via AXI4-Lite) and
+    // DRAM Header to the Compute Engine:
+    //   m_actual/dim_actual/n_vectors → read from DDR4 Header (L35-L37)
+    //   top_k → from AXI4-Lite register (L468)
+    //   metric_id → from AXI4-Lite register (L469)
+    meta.metric_id = metric_id;
 
 #ifndef __SYNTHESIS__
     // ─── C Simulation: sequential execution ───
