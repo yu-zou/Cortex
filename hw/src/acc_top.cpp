@@ -86,9 +86,10 @@ QRY_READ:
 PQ_STREAM:
     for (ap_uint<32> n = 0; n < N_val; n++) {
 #pragma HLS PIPELINE II=1
+        // Each PQ entry occupies exactly 1 beat (M_val+16 ≤ 64 bytes).
+        // Entries stored sequentially at 64-byte boundaries in DRAM.
         cb_pq_word_t beat = 0;
-        ap_uint<32> beat_idx = (n * entry_bytes) / 64;
-        beat = pq_beats_ptr[beat_idx];
+        beat = pq_beats_ptr[n];
         
         // Pre-extract doc_addr/doc_len from beat's known byte positions
         // PQ entry layout (LE byte order at HIGH bits of beat):
@@ -123,7 +124,7 @@ PQ_STREAM:
     ap_uint<128>* res128_ptr = (ap_uint<128>*)(dram + result_ddr_addr.to_uint64());
     (void)res128_ptr;  // Used in RESULT_WRITE loop
 #endif
-    ap_uint<32> push_count = (top_k > 0 && top_k <= TOPK_MAX) ? top_k : TOPK_MAX;
+    ap_uint<32> push_count = (top_k > 0 && top_k <= TOPK_MAX) ? top_k : (ap_uint<32>)TOPK_MAX;
 RESULT_WRITE:
     for (ap_uint<32> i = 0; i < push_count; i++) {
 #pragma HLS PIPELINE II=1
@@ -395,7 +396,7 @@ PQ_PROCESS:
     merge_banks_to_global(banks, cells);
 
     // Stage 5: Push Results → FIFO_RES
-    ap_uint<32> push_count = (top_k > 0 && top_k <= TOPK_MAX) ? top_k : TOPK_MAX;
+    ap_uint<32> push_count = (top_k > 0 && top_k <= TOPK_MAX) ? top_k : (ap_uint<32>)TOPK_MAX;
 RESULT_PUSH:
     for (ap_uint<32> i = 0; i < push_count; i++) {
 #pragma HLS PIPELINE II=1
