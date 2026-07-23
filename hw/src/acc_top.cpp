@@ -169,7 +169,6 @@ void systolic_topk_insert(
     ap_uint<32>  cand_len,
     TopKCell     cells[TOPK_MAX]
 ) {
-#pragma HLS INLINE
     float        cd_float = cand_dist;
     ap_uint<32>  cd_int   = *((ap_uint<32>*)&cand_dist);
     ap_uint<64>  ca = cand_addr;
