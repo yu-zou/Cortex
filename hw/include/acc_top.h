@@ -13,7 +13,7 @@
 #define M_MAX      48
 #define DIM_MAX    768
 #define KS         256         // Hardcoded, default PQ Codebook centroid count
-#define TOPK_MAX   500
+#define TOPK_MAX   512
 #define TOPK_BANK_SIZE 16    // Cells per systolic bank for pipeline balancing
 
 // ─── Synthesis parameters (smaller for faster iteration) ───

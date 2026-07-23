@@ -160,34 +160,45 @@ float sub_dist_l2(float q, float c) {
     return d * d;
 }
 
-// Systolic Top-K: 500-stage pipelined insertion chain
-// II=1: one new candidate per cycle, 500-cycle total latency
-// Each stage: 1 comparator + 3 muxes, pipeline registers between stages
+// Cascaded Top-K: 32 stages × 16 cells UNROLL per stage
+// Stage i processes cells[i*16 .. i*16+15] in 1 cycle (16 comparators, combinational)
+// 32 pipeline stages, II=1 — 32 vectors in flight
+// Critical path: 16 comparators (fits in 5ns), not 512
+// Pipeline registers: 32 stages × 160 bits ≈ 5K bits (vs 500-stage's 80K)
+// Exact Top-K guarantee (all candidates compared against all cells)
+static const int STAGES = TOPK_MAX / TOPK_BANK_SIZE;  // 512/16 = 32
+
 void systolic_topk_insert(
     float        cand_dist,
     ap_uint<64>  cand_addr,
     ap_uint<32>  cand_len,
     TopKCell     cells[TOPK_MAX]
 ) {
+#pragma HLS INLINE
     float        cd_float = cand_dist;
     ap_uint<32>  cd_int   = *((ap_uint<32>*)&cand_dist);
     ap_uint<64>  ca = cand_addr;
     ap_uint<32>  cl = cand_len;
-SYSTOLIC_CHAIN:
-    for (int i = 0; i < TOPK_MAX; i++) {
+
+CASCADE_STAGES:
+    for (int s = 0; s < STAGES; s++) {
 #pragma HLS PIPELINE II=1
-        ap_uint<32> cell_int = *((ap_uint<32>*)&cells[i].best_dist);
-        if (cd_int < cell_int) {
-            float        td = cells[i].best_dist;
-            ap_uint<64>  ta = cells[i].best_addr;
-            ap_uint<32>  tl = cells[i].best_len;
-            cells[i].best_dist = cd_float;
-            cells[i].best_addr = ca;
-            cells[i].best_len  = cl;
-            cd_float = td;
-            cd_int   = *((ap_uint<32>*)&td);
-            ca = ta;
-            cl = tl;
+        for (int i = 0; i < TOPK_BANK_SIZE; i++) {
+#pragma HLS UNROLL
+            int idx = s * TOPK_BANK_SIZE + i;
+            ap_uint<32> cell_int = *((ap_uint<32>*)&cells[idx].best_dist);
+            if (cd_int < cell_int) {
+                float        td = cells[idx].best_dist;
+                ap_uint<64>  ta = cells[idx].best_addr;
+                ap_uint<32>  tl = cells[idx].best_len;
+                cells[idx].best_dist = cd_float;
+                cells[idx].best_addr = ca;
+                cells[idx].best_len  = cl;
+                cd_float = td;
+                cd_int   = *((ap_uint<32>*)&td);
+                ca = ta;
+                cl = tl;
+            }
         }
     }
 }
@@ -327,11 +338,9 @@ PQ_PROCESS:
             }
         }
 
-        // Stage 4: Systolic Top-K
+        // Stage 4: Systolic Top-K cascaded insertion
         systolic_topk_insert(total_dist, doc_addr, doc_len, cells);
     }
-
-
 
     // Stage 5: Push Results → FIFO_RES
     ap_uint<32> push_count = (top_k > 0 && top_k <= TOPK_MAX) ? top_k : (ap_uint<32>)TOPK_MAX;
