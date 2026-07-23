@@ -14,7 +14,9 @@
 #define DIM_MAX    768
 #define KS         256         // Hardcoded, default PQ Codebook centroid count
 #define TOPK_MAX   500
-#define TOPK_BANK_SIZE 20    // Cells per systolic bank for pipeline balancing (500/20=25 stages)
+#define TOPK_STAGES      50
+#define CELLS_PER_STAGE  10
+#define TOPK_INF_KEY     0x7F800000u
 
 // ─── Synthesis parameters (smaller for faster iteration) ───
 #define M_SYN      16
@@ -22,10 +24,8 @@
 #define DS_SYN     (DIM_SYN / M_SYN)  // = 8
 
 // ─── PQ Entry format ───
-#define PQ_CODE_BYTES    M_SYN
-#define PQ_META_BYTES    16
-#define PQ_ENTRY_BYTES   (PQ_CODE_BYTES + PQ_META_BYTES)
-#define PQ_ENTRY_BITS    (PQ_ENTRY_BYTES * 8)
+#define ENTRY_BYTES_SYN  (M_SYN + 16)
+#define ENTRY_BITS_SYN   (ENTRY_BYTES_SYN * 8)
 
 // ─── Result: 128-bit ───
 typedef ap_uint<128>  result_word_t;
@@ -46,11 +46,11 @@ struct ComputeMeta {
     ap_uint<2>   metric_id;
 };
 
-// ─── Systolic cell ───
-struct TopKCell {
-    float        best_dist;
-    ap_uint<64>  best_addr;
-    ap_uint<32>  best_len;
+// ─── Top-K candidate ───
+struct TopKCandidate {
+    ap_uint<32>  dist_key;
+    ap_uint<64>  doc_addr;
+    ap_uint<32>  doc_len;
 };
 
 // ─── Top-level ───

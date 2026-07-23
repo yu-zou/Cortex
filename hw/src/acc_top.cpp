@@ -145,13 +145,9 @@ RESULT_WRITE:
 
 
 // ═══════════════════════════════════════════════════════════════
-// COMPUTE ENGINE — Six-stage pipeline
-// Stage 0: Codebook load (when reload_codebook=1)
-// Stage 1: Top-K initialization (FP32_MAX)
-// Stage 2: PQ vector unpack (1 beat/vec, 512bit, data at high bits, low bits zero-padded)
-// Stage 3: ADC L2 distance computation (M sub-quantizers fully unrolled in parallel)
-// Stage 4: Systolic Top-K streaming sort
-// Stage 5: Result push → FIFO_RES (128bit: dist+doc_addr+doc_length)
+// COMPUTE ENGINE — DATAFLOW-decoupled ADC + exact Top-K
+// adc_engine: codebook/query load + ADC distance computation
+// topk_engine: exact 500-cell integer-key systolic insertion sort
 // ═══════════════════════════════════════════════════════════════
 
 float sub_dist_l2(float q, float c) {
@@ -160,82 +156,186 @@ float sub_dist_l2(float q, float c) {
     return d * d;
 }
 
-// Banked Top-K: distribute candidates round-robin over independent banks.
-// This keeps Top-K out of the ADC II=1 hot path: each PQ iteration only touches
-// one TOPK_BANK_SIZE-cell bank, then all banks are merged after PQ_PROCESS.
-static const int BANKS = (TOPK_MAX + TOPK_BANK_SIZE - 1) / TOPK_BANK_SIZE;
+typedef ap_uint<128> topk_candidate_word_t;
 
-void systolic_topk_insert_bank(
-    float        cand_dist,
-    ap_uint<64>  cand_addr,
-    ap_uint<32>  cand_len,
-    TopKCell     cells[TOPK_BANK_SIZE]
+static topk_candidate_word_t pack_topk_candidate(
+    ap_uint<32> dist_key,
+    ap_uint<64> doc_addr,
+    ap_uint<32> doc_len
 ) {
 #pragma HLS INLINE
-#pragma HLS ARRAY_PARTITION variable=cells complete dim=1
-    float        cd_float = cand_dist;
-    ap_uint<32>  cd_int   = *((ap_uint<32>*)&cand_dist);
-    ap_uint<64>  ca = cand_addr;
-    ap_uint<32>  cl = cand_len;
+    topk_candidate_word_t word = 0;
+    word.range(31,  0)  = dist_key;
+    word.range(95,  32) = doc_addr;
+    word.range(127, 96) = doc_len;
+    return word;
+}
 
-BANK_CHAIN:
-    for (int i = 0; i < TOPK_BANK_SIZE; i++) {
+void adc_engine(
+    hls::stream<cb_pq_word_t>    &cb_fifo,
+    hls::stream<cb_pq_word_t>    &pq_fifo,
+    hls::stream<float>           &query_fifo,
+    hls::stream<topk_candidate_word_t> &cand_out,
+    ComputeMeta                   meta_in,
+    ap_uint<1>                    reload_codebook
+) {
+#pragma HLS INLINE off
+    ap_uint<32> M_val   = meta_in.m_actual;
+    ap_uint<32> DIM_val = meta_in.dim_actual;
+    ap_uint<32> N_val   = meta_in.n_vectors;
+    ap_uint<32> Ds_val  = DIM_val / M_val;
+
+    // Codebook BRAM (KS=256 uniform)
+    static float codebook[M_SYN][KS][DS_SYN];
+#pragma HLS RESOURCE variable=codebook core=RAM_2P_BRAM
+#pragma HLS ARRAY_PARTITION variable=codebook complete dim=1
+#pragma HLS ARRAY_PARTITION variable=codebook complete dim=3
+
+    // Query registers
+    float query[DIM_SYN];
+#pragma HLS ARRAY_PARTITION variable=query complete dim=1
+
+    static float dist_table[M_SYN][KS];
+#pragma HLS ARRAY_PARTITION variable=dist_table complete dim=1
+
+QRY_LOAD:
+    for (ap_uint<32> i = 0; i < DIM_val; i++) {
+#pragma HLS PIPELINE II=1
+        query[i] = query_fifo.read();
+    }
+
+    // Load Codebook — sequential float stream, compute address from counter.
+    ap_uint<32> cb_total = M_val * KS * Ds_val;
+    ap_uint<32> cb_beats = (cb_total * 4 + 63) / 64;
+
+CB_LOAD:
+    if (reload_codebook) {
+        ap_uint<32> counter = 0;
+        for (ap_uint<32> b = 0; b < cb_beats; b++) {
+#pragma HLS PIPELINE II=1
+            cb_pq_word_t beat = cb_fifo.read();
+            for (int f = 0; f < 16; f++) {
 #pragma HLS UNROLL
-        ap_uint<32> cell_int = *((ap_uint<32>*)&cells[i].best_dist);
-        if (cd_int < cell_int) {
-            float        td = cells[i].best_dist;
-            ap_uint<64>  ta = cells[i].best_addr;
-            ap_uint<32>  tl = cells[i].best_len;
-            cells[i].best_dist = cd_float;
-            cells[i].best_addr = ca;
-            cells[i].best_len  = cl;
-            cd_float = td;
-            cd_int   = *((ap_uint<32>*)&td);
-            ca = ta;
-            cl = tl;
+                ap_uint<32> gidx = counter + f;
+                if (gidx < cb_total) {
+                    ap_uint<32> raw = beat.range(32*f+31, 32*f);
+                    float val = *((float*)&raw);
+                    // M_SYN=16, DS_SYN=8: per_m = 256*8 = 2048.
+                    ap_uint<5>  m_addr = gidx >> 11;
+                    ap_uint<32> rem    = gidx & 0x7FF;
+                    ap_uint<8>  k_addr = rem >> 3;
+                    ap_uint<4>  d_addr = rem & 0x7;
+                    if (m_addr < M_val) {
+                        codebook[m_addr][k_addr][d_addr] = val;
+                    }
+                }
+            }
+            counter += 16;
         }
+    }
+
+DIST_TABLE_BUILD:
+    for (int c = 0; c < KS; c++) {
+        for (int m = 0; m < M_SYN; m++) {
+#pragma HLS PIPELINE II=1
+            float acc = 0.0f;
+            for (int d = 0; d < DS_SYN; d++) {
+#pragma HLS UNROLL
+                acc += sub_dist_l2(query[m * DS_SYN + d], codebook[m][c][d]);
+            }
+            dist_table[m][c] = acc;
+        }
+    }
+
+PQ_PROCESS:
+    for (ap_uint<32> n = 0; n < N_val; n++) {
+#pragma HLS PIPELINE II=1
+        cb_pq_word_t beat = pq_fifo.read();
+        ap_uint<512> raw  = beat;
+
+        // Right-align fixed synthesis entry width: M_SYN PQ bytes + 16 metadata bytes.
+        ap_uint<512> shifted = raw >> (512 - ENTRY_BITS_SYN);
+
+        // DM pre-extracted doc_addr/doc_len → read directly from low 96 bits.
+        ap_uint<64> doc_addr = beat.range(95, 32);
+        ap_uint<32> doc_len  = beat.range(31, 0);
+
+        // PQ codes: compile-time bit positions avoid runtime variable part-selects.
+        ap_uint<8> pq_codes[M_SYN];
+#pragma HLS ARRAY_PARTITION variable=pq_codes complete dim=1
+        for (int m = 0; m < M_SYN; m++) {
+#pragma HLS UNROLL
+            pq_codes[m] = shifted.range(ENTRY_BITS_SYN - 1 - m*8,
+                                        ENTRY_BITS_SYN - 8 - m*8);
+        }
+
+        float part[M_SYN];
+#pragma HLS ARRAY_PARTITION variable=part complete dim=1
+    ADC_LOOKUP:
+        for (int m = 0; m < M_SYN; m++) {
+#pragma HLS UNROLL
+            part[m] = dist_table[m][pq_codes[m]];
+        }
+
+        float s8[8], s4[4], s2[2];
+    ADC_SUM8:
+        for (int i = 0; i < 8; i++) {
+#pragma HLS UNROLL
+            s8[i] = part[2*i] + part[2*i+1];
+        }
+    ADC_SUM4:
+        for (int i = 0; i < 4; i++) {
+#pragma HLS UNROLL
+            s4[i] = s8[2*i] + s8[2*i+1];
+        }
+    ADC_SUM2:
+        for (int i = 0; i < 2; i++) {
+#pragma HLS UNROLL
+            s2[i] = s4[2*i] + s4[2*i+1];
+        }
+        float total_dist = s2[0] + s2[1];
+
+        ap_uint<32> dist_key = *((ap_uint<32>*)&total_dist);
+        cand_out.write(pack_topk_candidate(dist_key, doc_addr, doc_len));
     }
 }
 
-static void merge_banks_to_global(
-    TopKCell banks[BANKS][TOPK_BANK_SIZE],
-    TopKCell global[TOPK_MAX]
+void topk_engine(
+    hls::stream<topk_candidate_word_t> &cand_in,
+    hls::stream<res_word_t>             &res_out,
+    ap_uint<32>                          n_total,
+    ap_uint<32>                          top_k
 ) {
-MERGE_INIT:
+#pragma HLS INLINE off
+    topk_candidate_word_t cells[TOPK_MAX];
+#pragma HLS ARRAY_PARTITION variable=cells complete dim=1
+
+TOPK_INIT:
     for (int i = 0; i < TOPK_MAX; i++) {
 #pragma HLS PIPELINE II=1
-        global[i].best_dist = 3.402823466e+38f;
-        global[i].best_addr = 0;
-        global[i].best_len  = 0;
+        cells[i] = pack_topk_candidate(TOPK_INF_KEY, 0, 0);
     }
 
-MERGE_FLATTEN:
-    for (int b = 0; b < BANKS; b++) {
-        for (int i = 0; i < TOPK_BANK_SIZE; i++) {
+TOPK_PROCESS:
+    for (ap_uint<32> n = 0; n < n_total; n++) {
 #pragma HLS PIPELINE II=1
-            TopKCell cand = banks[b][i];
-            float        cd_float = cand.best_dist;
-            ap_uint<32>  cd_int   = *((ap_uint<32>*)&cand.best_dist);
-            ap_uint<64>  ca = cand.best_addr;
-            ap_uint<32>  cl = cand.best_len;
-        MERGE_INSERT:
-            for (int j = 0; j < TOPK_MAX; j++) {
-#pragma HLS UNROLL factor=4
-                ap_uint<32> cell_int = *((ap_uint<32>*)&global[j].best_dist);
-                if (cd_int < cell_int) {
-                    float        td = global[j].best_dist;
-                    ap_uint<64>  ta = global[j].best_addr;
-                    ap_uint<32>  tl = global[j].best_len;
-                    global[j].best_dist = cd_float;
-                    global[j].best_addr = ca;
-                    global[j].best_len  = cl;
-                    cd_float = td;
-                    cd_int   = *((ap_uint<32>*)&td);
-                    ca = ta;
-                    cl = tl;
-                }
+        topk_candidate_word_t cand = cand_in.read();
+    TOPK_CHAIN:
+        for (int i = 0; i < TOPK_MAX; i++) {
+#pragma HLS UNROLL
+            if (cand.range(31, 0) < cells[i].range(31, 0)) {
+                topk_candidate_word_t tmp = cells[i];
+                cells[i] = cand;
+                cand = tmp;
             }
         }
+    }
+
+    ap_uint<32> push_count = (top_k > 0 && top_k <= TOPK_MAX) ? top_k : (ap_uint<32>)TOPK_MAX;
+RESULT_PUSH:
+    for (ap_uint<32> i = 0; i < push_count; i++) {
+#pragma HLS PIPELINE II=1
+        res_out.write(cells[i]);
     }
 }
 
@@ -254,150 +354,12 @@ void compute_engine(
     comp_done = false;
     if (!comp_start) return;
 
-    ap_uint<32> M_val   = meta_in.m_actual;
-    ap_uint<32> DIM_val = meta_in.dim_actual;
-    ap_uint<32> N_val   = meta_in.n_vectors;
-    ap_uint<32> Ds_val  = DIM_val / M_val;
+    static hls::stream<topk_candidate_word_t> cand_stream("cand_stream");
+#pragma HLS STREAM variable=cand_stream depth=64
 
-    // Codebook BRAM (KS=256 uniform)
-    static float codebook[M_SYN][KS][DS_SYN];
-#pragma HLS RESOURCE variable=codebook core=RAM_2P_BRAM
-#pragma HLS ARRAY_PARTITION variable=codebook complete dim=1
-#pragma HLS ARRAY_PARTITION variable=codebook complete dim=3
-
-    // Query BRAM
-    float query[DIM_SYN];
-#pragma HLS ARRAY_PARTITION variable=query complete dim=1
-
-    // Load Query
-QRY_LOAD:
-    for (ap_uint<32> i = 0; i < DIM_val; i++) {
-#pragma HLS PIPELINE II=1
-        query[i] = query_fifo.read();
-    }
-
-    // Stage 0: Load Codebook — sequential float stream, compute address from counter
-    ap_uint<32> cb_total = M_val * KS * Ds_val;
-    ap_uint<32> cb_beats = (cb_total * 4 + 63) / 64;
-
-CB_LOAD:
-    if (reload_codebook) {
-        ap_uint<32> counter = 0;
-        for (ap_uint<32> b = 0; b < cb_beats; b++) {
-#pragma HLS PIPELINE II=1
-            cb_pq_word_t beat = cb_fifo.read();
-            for (int f = 0; f < 16; f++) {
-#pragma HLS UNROLL
-                ap_uint<32> gidx = counter + f;
-                if (gidx < cb_total) {
-                    ap_uint<32> raw = beat.range(32*f+31, 32*f);
-                    float val = *((float*)&raw);
-                    // Power-of-2 address: m = gidx>>11, rem = gidx&0x7FF, k = rem>>3, d = rem&0x7
-                    ap_uint<5>  m_addr  = gidx >> 11;
-                    ap_uint<32> rem     = gidx & 0x7FF;
-                    ap_uint<8>  k_addr  = rem >> 3;
-                    ap_uint<4>  d_addr  = rem & 0x7;
-                    if (m_addr < M_val) {
-                        codebook[m_addr][k_addr][d_addr] = val;
-                    }
-                }
-            }
-            counter += 16;
-        }
-    }
-
-
-
-    // Stage 1: Top-K Init (banked)
-    TopKCell banks[BANKS][TOPK_BANK_SIZE];
-#pragma HLS ARRAY_PARTITION variable=banks complete dim=2
-TK_INIT:
-    for (int b = 0; b < BANKS; b++) {
-        for (int i = 0; i < TOPK_BANK_SIZE; i++) {
-#pragma HLS PIPELINE II=1
-            banks[b][i].best_dist = 3.402823466e+38f;
-            banks[b][i].best_addr = 0;
-            banks[b][i].best_len  = 0;
-        }
-    }
-
-    // Stage 2-4: Main Processing
-    // 1 beat = 1 vector (padded to 512 bits)
-    ap_uint<32> entry_bytes = M_val + 16;
-
-PQ_PROCESS:
-    for (ap_uint<32> n = 0; n < N_val; n++) {
-#pragma HLS PIPELINE II=1
-        cb_pq_word_t beat = pq_fifo.read();
-        ap_uint<512> raw  = beat;
-
-        // Right-align: data at HIGH bits, zeros at LOW bits
-        ap_uint<512> shifted = raw >> (512 - entry_bytes * 8);
-
-        // Extract fields from right-aligned entry.
-        // DM packs bytes from HIGH to LOW bits; reconstruct LE values.
-        ap_uint<32> entry_bits = entry_bytes * 8;
-
-        // DM pre-extracted doc_addr/doc_len → read directly from low 96 bits
-        ap_uint<64> doc_addr = beat.range(95, 32);
-        ap_uint<32> doc_len  = beat.range(31, 0);
-
-        // PQ codes: bytes 0..M_SYN-1 of entry (constant bound for unrolling)
-        ap_uint<8> pq_codes[M_SYN];
-#pragma HLS ARRAY_PARTITION variable=pq_codes complete dim=1
-        for (int m = 0; m < M_SYN; m++) {
-#pragma HLS UNROLL
-            if (m < M_val) {
-                pq_codes[m] = shifted.range(entry_bits - 1 - m*8,
-                                            entry_bits - 8 - m*8);
-            } else {
-                pq_codes[m] = 0;
-            }
-        }
-
-        // Stage 3: ADC (L2)
-        float total_dist = 0.0f;
-    ADC_M:
-        for (int m = 0; m < M_SYN; m++) {
-#pragma HLS UNROLL
-            if (m < M_val) {
-                ap_uint<8> c = pq_codes[m];  // 8-bit uniform PQ
-                float sub = 0.0f;
-            ADC_D:
-                for (int d = 0; d < DS_SYN; d++) {
-#pragma HLS UNROLL
-                    if (d < Ds_val) {
-                        float cent  = codebook[m][c][d];
-                        float q_sub = query[m * Ds_val + d];
-                        sub += sub_dist_l2(q_sub, cent);
-                    }
-                }
-                total_dist += sub;
-            }
-        }
-
-        // Stage 4: Banked Top-K insertion (round-robin, one bank per vector)
-        int bank_id = n % BANKS;
-        systolic_topk_insert_bank(total_dist, doc_addr, doc_len, banks[bank_id]);
-    }
-
-    // Merge bank-local Top-K lists after the ADC hot path.
-    TopKCell cells[TOPK_MAX];
-#pragma HLS ARRAY_PARTITION variable=cells complete dim=1
-    merge_banks_to_global(banks, cells);
-
-    // Stage 5: Push Results → FIFO_RES
-    ap_uint<32> push_count = (top_k > 0 && top_k <= TOPK_MAX) ? top_k : (ap_uint<32>)TOPK_MAX;
-RESULT_PUSH:
-    for (ap_uint<32> i = 0; i < push_count; i++) {
-#pragma HLS PIPELINE II=1
-        res_word_t result = 0;
-        ap_uint<32> dist_bits = *((ap_uint<32>*)&cells[i].best_dist);
-        result.range(31,  0)  = dist_bits;
-        result.range(95,  32) = cells[i].best_addr;
-        result.range(127, 96) = cells[i].best_len;
-        res_fifo_out.write(result);
-    }
+#pragma HLS DATAFLOW
+    adc_engine(cb_fifo, pq_fifo, query_fifo, cand_stream, meta_in, reload_codebook);
+    topk_engine(cand_stream, res_fifo_out, meta_in.n_vectors, top_k);
 
     comp_done = true;
 }
