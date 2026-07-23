@@ -195,9 +195,6 @@ void adc_engine(
     float query[DIM_SYN];
 #pragma HLS ARRAY_PARTITION variable=query complete dim=1
 
-    static float dist_table[M_SYN][KS];
-#pragma HLS ARRAY_PARTITION variable=dist_table complete dim=1
-
 QRY_LOAD:
     for (ap_uint<32> i = 0; i < DIM_val; i++) {
 #pragma HLS PIPELINE II=1
@@ -234,19 +231,6 @@ CB_LOAD:
         }
     }
 
-DIST_TABLE_BUILD:
-    for (int c = 0; c < KS; c++) {
-        for (int m = 0; m < M_SYN; m++) {
-#pragma HLS PIPELINE II=1
-            float acc = 0.0f;
-            for (int d = 0; d < DS_SYN; d++) {
-#pragma HLS UNROLL
-                acc += sub_dist_l2(query[m * DS_SYN + d], codebook[m][c][d]);
-            }
-            dist_table[m][c] = acc;
-        }
-    }
-
 PQ_PROCESS:
     for (ap_uint<32> n = 0; n < N_val; n++) {
 #pragma HLS PIPELINE II=1
@@ -269,31 +253,21 @@ PQ_PROCESS:
                                         ENTRY_BITS_SYN - 8 - m*8);
         }
 
-        float part[M_SYN];
-#pragma HLS ARRAY_PARTITION variable=part complete dim=1
-    ADC_LOOKUP:
+        float total_dist = 0.0f;
+    ADC_M:
         for (int m = 0; m < M_SYN; m++) {
 #pragma HLS UNROLL
-            part[m] = dist_table[m][pq_codes[m]];
-        }
-
-        float s8[8], s4[4], s2[2];
-    ADC_SUM8:
-        for (int i = 0; i < 8; i++) {
+            ap_uint<8> c = pq_codes[m];
+            float sub = 0.0f;
+        ADC_D:
+            for (int d = 0; d < DS_SYN; d++) {
 #pragma HLS UNROLL
-            s8[i] = part[2*i] + part[2*i+1];
+                float cent  = codebook[m][c][d];
+                float q_sub = query[m * DS_SYN + d];
+                sub += sub_dist_l2(q_sub, cent);
+            }
+            total_dist += sub;
         }
-    ADC_SUM4:
-        for (int i = 0; i < 4; i++) {
-#pragma HLS UNROLL
-            s4[i] = s8[2*i] + s8[2*i+1];
-        }
-    ADC_SUM2:
-        for (int i = 0; i < 2; i++) {
-#pragma HLS UNROLL
-            s2[i] = s4[2*i] + s4[2*i+1];
-        }
-        float total_dist = s2[0] + s2[1];
 
         ap_uint<32> dist_key = *((ap_uint<32>*)&total_dist);
         cand_out.write(pack_topk_candidate(dist_key, doc_addr, doc_len));
