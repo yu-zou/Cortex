@@ -160,13 +160,13 @@ float sub_dist_l2(float q, float c) {
     return d * d;
 }
 
-// Cascaded Top-K: 32 stages × 16 cells UNROLL per stage
-// Stage i processes cells[i*16 .. i*16+15] in 1 cycle (16 comparators, combinational)
-// 32 pipeline stages, II=1 — 32 vectors in flight
-// Critical path: 16 comparators (fits in 5ns), not 512
-// Pipeline registers: 32 stages × 160 bits ≈ 5K bits (vs 500-stage's 80K)
+// Cascaded Top-K: 25 stages × 20 cells UNROLL per stage
+// Stage i processes cells[i*20 .. i*20+19] in 1 cycle (20 comparators, combinational)
+// 25 pipeline stages, II=1 — 25 vectors in flight
+// Critical path: 20 comparators (~4.56ns comb., fits 5ns target)
+// Pipeline registers: 25 stages × 160 bits ≈ 4K bits (vs 500-stage's 80K)
 // Exact Top-K guarantee (all candidates compared against all cells)
-static const int STAGES = TOPK_MAX / TOPK_BANK_SIZE;  // 512/16 = 32
+static const int STAGES = TOPK_MAX / TOPK_BANK_SIZE;  // 500/20 = 25
 
 void systolic_topk_insert(
     float        cand_dist,
@@ -274,7 +274,7 @@ CB_LOAD:
 
     // Stage 1: Top-K Init
     TopKCell cells[TOPK_MAX];
-#pragma HLS ARRAY_PARTITION variable=cells cyclic factor=16 dim=1
+#pragma HLS ARRAY_PARTITION variable=cells cyclic factor=20 dim=1  // = TOPK_BANK_SIZE
 TK_INIT:
     for (int i = 0; i < TOPK_MAX; i++) {
 #pragma HLS UNROLL
