@@ -170,7 +170,6 @@ void systolic_topk_insert(
     TopKCell     cells[TOPK_MAX]
 ) {
 #pragma HLS INLINE
-#pragma HLS ARRAY_PARTITION variable=cells complete dim=1
     float        cd_float = cand_dist;
     ap_uint<32>  cd_int   = *((ap_uint<32>*)&cand_dist);
     ap_uint<64>  ca = cand_addr;
@@ -265,7 +264,7 @@ CB_LOAD:
 
     // Stage 1: Top-K Init
     TopKCell cells[TOPK_MAX];
-#pragma HLS ARRAY_PARTITION variable=cells complete dim=1
+#pragma HLS ARRAY_PARTITION variable=cells cyclic factor=16 dim=1
 TK_INIT:
     for (int i = 0; i < TOPK_MAX; i++) {
 #pragma HLS UNROLL
