@@ -14,8 +14,6 @@
 #define DIM_MAX    768
 #define KS         256         // Hardcoded, default PQ Codebook centroid count
 #define TOPK_MAX   500
-#define TOPK_STAGES      50
-#define CELLS_PER_STAGE  10
 #define TOPK_INF_KEY     0x7F800000u
 
 // ─── Synthesis parameters (smaller for faster iteration) ───
