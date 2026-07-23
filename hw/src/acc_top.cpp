@@ -160,44 +160,80 @@ float sub_dist_l2(float q, float c) {
     return d * d;
 }
 
-// Cascaded Top-K: 25 stages × 20 cells UNROLL per stage
-// Stage i processes cells[i*20 .. i*20+19] in 1 cycle (20 comparators, combinational)
-// 25 pipeline stages, II=1 — 25 vectors in flight
-// Critical path: 20 comparators (~4.56ns comb., fits 5ns target)
-// Pipeline registers: 25 stages × 160 bits ≈ 4K bits (vs 500-stage's 80K)
-// Exact Top-K guarantee (all candidates compared against all cells)
-static const int STAGES = TOPK_MAX / TOPK_BANK_SIZE;  // 500/20 = 25
+// Banked Top-K: distribute candidates round-robin over independent banks.
+// This keeps Top-K out of the ADC II=1 hot path: each PQ iteration only touches
+// one TOPK_BANK_SIZE-cell bank, then all banks are merged after PQ_PROCESS.
+static const int BANKS = (TOPK_MAX + TOPK_BANK_SIZE - 1) / TOPK_BANK_SIZE;
 
-void systolic_topk_insert(
+void systolic_topk_insert_bank(
     float        cand_dist,
     ap_uint<64>  cand_addr,
     ap_uint<32>  cand_len,
-    TopKCell     cells[TOPK_MAX]
+    TopKCell     cells[TOPK_BANK_SIZE]
 ) {
 #pragma HLS INLINE
+#pragma HLS ARRAY_PARTITION variable=cells complete dim=1
     float        cd_float = cand_dist;
     ap_uint<32>  cd_int   = *((ap_uint<32>*)&cand_dist);
     ap_uint<64>  ca = cand_addr;
     ap_uint<32>  cl = cand_len;
 
-CASCADE_STAGES:
-    for (int s = 0; s < STAGES; s++) {
-#pragma HLS PIPELINE II=1
-        for (int i = 0; i < TOPK_BANK_SIZE; i++) {
+BANK_CHAIN:
+    for (int i = 0; i < TOPK_BANK_SIZE; i++) {
 #pragma HLS UNROLL
-            int idx = s * TOPK_BANK_SIZE + i;
-            ap_uint<32> cell_int = *((ap_uint<32>*)&cells[idx].best_dist);
-            if (cd_int < cell_int) {
-                float        td = cells[idx].best_dist;
-                ap_uint<64>  ta = cells[idx].best_addr;
-                ap_uint<32>  tl = cells[idx].best_len;
-                cells[idx].best_dist = cd_float;
-                cells[idx].best_addr = ca;
-                cells[idx].best_len  = cl;
-                cd_float = td;
-                cd_int   = *((ap_uint<32>*)&td);
-                ca = ta;
-                cl = tl;
+        ap_uint<32> cell_int = *((ap_uint<32>*)&cells[i].best_dist);
+        if (cd_int < cell_int) {
+            float        td = cells[i].best_dist;
+            ap_uint<64>  ta = cells[i].best_addr;
+            ap_uint<32>  tl = cells[i].best_len;
+            cells[i].best_dist = cd_float;
+            cells[i].best_addr = ca;
+            cells[i].best_len  = cl;
+            cd_float = td;
+            cd_int   = *((ap_uint<32>*)&td);
+            ca = ta;
+            cl = tl;
+        }
+    }
+}
+
+static void merge_banks_to_global(
+    TopKCell banks[BANKS][TOPK_BANK_SIZE],
+    TopKCell global[TOPK_MAX]
+) {
+MERGE_INIT:
+    for (int i = 0; i < TOPK_MAX; i++) {
+#pragma HLS PIPELINE II=1
+        global[i].best_dist = 3.402823466e+38f;
+        global[i].best_addr = 0;
+        global[i].best_len  = 0;
+    }
+
+MERGE_FLATTEN:
+    for (int b = 0; b < BANKS; b++) {
+        for (int i = 0; i < TOPK_BANK_SIZE; i++) {
+#pragma HLS PIPELINE II=1
+            TopKCell cand = banks[b][i];
+            float        cd_float = cand.best_dist;
+            ap_uint<32>  cd_int   = *((ap_uint<32>*)&cand.best_dist);
+            ap_uint<64>  ca = cand.best_addr;
+            ap_uint<32>  cl = cand.best_len;
+        MERGE_INSERT:
+            for (int j = 0; j < TOPK_MAX; j++) {
+#pragma HLS UNROLL factor=4
+                ap_uint<32> cell_int = *((ap_uint<32>*)&global[j].best_dist);
+                if (cd_int < cell_int) {
+                    float        td = global[j].best_dist;
+                    ap_uint<64>  ta = global[j].best_addr;
+                    ap_uint<32>  tl = global[j].best_len;
+                    global[j].best_dist = cd_float;
+                    global[j].best_addr = ca;
+                    global[j].best_len  = cl;
+                    cd_float = td;
+                    cd_int   = *((ap_uint<32>*)&td);
+                    ca = ta;
+                    cl = tl;
+                }
             }
         }
     }
@@ -272,15 +308,17 @@ CB_LOAD:
 
 
 
-    // Stage 1: Top-K Init
-    TopKCell cells[TOPK_MAX];
-#pragma HLS ARRAY_PARTITION variable=cells cyclic factor=20 dim=1  // = TOPK_BANK_SIZE
+    // Stage 1: Top-K Init (banked)
+    TopKCell banks[BANKS][TOPK_BANK_SIZE];
+#pragma HLS ARRAY_PARTITION variable=banks complete dim=2
 TK_INIT:
-    for (int i = 0; i < TOPK_MAX; i++) {
-#pragma HLS UNROLL
-        cells[i].best_dist = 3.402823466e+38f;
-        cells[i].best_addr = 0;
-        cells[i].best_len  = 0;
+    for (int b = 0; b < BANKS; b++) {
+        for (int i = 0; i < TOPK_BANK_SIZE; i++) {
+#pragma HLS PIPELINE II=1
+            banks[b][i].best_dist = 3.402823466e+38f;
+            banks[b][i].best_addr = 0;
+            banks[b][i].best_len  = 0;
+        }
     }
 
     // Stage 2-4: Main Processing
@@ -338,9 +376,15 @@ PQ_PROCESS:
             }
         }
 
-        // Stage 4: Systolic Top-K cascaded insertion
-        systolic_topk_insert(total_dist, doc_addr, doc_len, cells);
+        // Stage 4: Banked Top-K insertion (round-robin, one bank per vector)
+        int bank_id = n % BANKS;
+        systolic_topk_insert_bank(total_dist, doc_addr, doc_len, banks[bank_id]);
     }
+
+    // Merge bank-local Top-K lists after the ADC hot path.
+    TopKCell cells[TOPK_MAX];
+#pragma HLS ARRAY_PARTITION variable=cells complete dim=1
+    merge_banks_to_global(banks, cells);
 
     // Stage 5: Push Results → FIFO_RES
     ap_uint<32> push_count = (top_k > 0 && top_k <= TOPK_MAX) ? top_k : (ap_uint<32>)TOPK_MAX;

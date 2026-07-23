@@ -1,11 +1,11 @@
 open_project acc_top_proj -reset
-set_top compute_engine
+set_top acc_top
 
 add_files src/acc_top.cpp
 add_files -tb test/testbench.cpp
 
 open_solution solution1 -flow_target vivado
-set_part {xcvu5p-flva2104-1-e}
+set_part {xczu17eg-ffvc1760-2-e}
 create_clock -period 5 -name default
 
 # C Synthesis
