@@ -160,20 +160,14 @@ float sub_dist_l2(float q, float c) {
     return d * d;
 }
 
-// Systolic Top-K: 2-level banked architecture
-// Level 0: N banks of TOPK_BANK_SIZE=16 cells each, fully unrolled per bank
-// Level 1: Merge all banks into global Top-K
-// Banks = ceil(TOPK_MAX / TOPK_BANK_SIZE) = 32
-// Total cells at Level 0: 32 x 16 = 512 (vs 500 in monolithic)
-// Critical path: 16 comparators (vs 500) — timing closure at 200MHz+
-
-static const int BANKS = (TOPK_MAX + TOPK_BANK_SIZE - 1) / TOPK_BANK_SIZE;  // 32
-
-void systolic_topk_insert_bank(
+// Systolic Top-K: 500-stage pipelined insertion chain
+// II=1: one new candidate per cycle, 500-cycle total latency
+// Each stage: 1 comparator + 3 muxes, pipeline registers between stages
+void systolic_topk_insert(
     float        cand_dist,
     ap_uint<64>  cand_addr,
     ap_uint<32>  cand_len,
-    TopKCell     cells[TOPK_BANK_SIZE]
+    TopKCell     cells[TOPK_MAX]
 ) {
 #pragma HLS INLINE
 #pragma HLS ARRAY_PARTITION variable=cells complete dim=1
@@ -181,9 +175,9 @@ void systolic_topk_insert_bank(
     ap_uint<32>  cd_int   = *((ap_uint<32>*)&cand_dist);
     ap_uint<64>  ca = cand_addr;
     ap_uint<32>  cl = cand_len;
-BANK_CHAIN:
-    for (int i = 0; i < TOPK_BANK_SIZE; i++) {
-#pragma HLS UNROLL
+SYSTOLIC_CHAIN:
+    for (int i = 0; i < TOPK_MAX; i++) {
+#pragma HLS PIPELINE II=1
         ap_uint<32> cell_int = *((ap_uint<32>*)&cells[i].best_dist);
         if (cd_int < cell_int) {
             float        td = cells[i].best_dist;
@@ -196,54 +190,6 @@ BANK_CHAIN:
             cd_int   = *((ap_uint<32>*)&td);
             ca = ta;
             cl = tl;
-        }
-    }
-}
-
-// Level 1: Merge 32 sorted banks into global Top-500
-// Simple approach: flatten banks into global, keep min-heap like insertion
-static void merge_banks_to_global(
-    TopKCell banks[BANKS][TOPK_BANK_SIZE],
-    TopKCell global[TOPK_MAX]
-) {
-    // Initialize global with FP32_MAX
-MERGE_INIT:
-    for (int i = 0; i < TOPK_MAX; i++) {
-#pragma HLS PIPELINE II=1
-        global[i].best_dist = 3.402823466e+38f;
-        global[i].best_addr = 0;
-        global[i].best_len  = 0;
-    }
-    
-    // Flatten banks: insert each entry into global using systolic insertion
-    // (reuses the same pattern as the bank chain — small and efficient)
-MERGE_FLATTEN:
-    for (int b = 0; b < BANKS; b++) {
-        for (int i = 0; i < TOPK_BANK_SIZE; i++) {
-#pragma HLS PIPELINE II=1
-            TopKCell cand = banks[b][i];
-            // Re-use systolic insertion pattern: insert into global
-            float        cd_float = cand.best_dist;
-            ap_uint<32>  cd_int   = *((ap_uint<32>*)&cand.best_dist);
-            ap_uint<64>  ca = cand.best_addr;
-            ap_uint<32>  cl = cand.best_len;
-        MERGE_INSERT:
-            for (int j = 0; j < TOPK_MAX; j++) {
-#pragma HLS PIPELINE II=1
-                ap_uint<32> cell_int = *((ap_uint<32>*)&global[j].best_dist);
-                if (cd_int < cell_int) {
-                    float        td = global[j].best_dist;
-                    ap_uint<64>  ta = global[j].best_addr;
-                    ap_uint<32>  tl = global[j].best_len;
-                    global[j].best_dist = cd_float;
-                    global[j].best_addr = ca;
-                    global[j].best_len  = cl;
-                    cd_float = td;
-                    cd_int   = *((ap_uint<32>*)&td);
-                    ca = ta;
-                    cl = tl;
-                }
-            }
         }
     }
 }
@@ -317,17 +263,15 @@ CB_LOAD:
 
 
 
-    // Stage 1: Top-K Init (banked)
-    TopKCell banks[BANKS][TOPK_BANK_SIZE];
-#pragma HLS ARRAY_PARTITION variable=banks complete dim=2
+    // Stage 1: Top-K Init
+    TopKCell cells[TOPK_MAX];
+#pragma HLS ARRAY_PARTITION variable=cells complete dim=1
 TK_INIT:
-    for (int b = 0; b < BANKS; b++) {
-        for (int i = 0; i < TOPK_BANK_SIZE; i++) {
-#pragma HLS PIPELINE II=1
-            banks[b][i].best_dist = 3.402823466e+38f;
-            banks[b][i].best_addr = 0;
-            banks[b][i].best_len  = 0;
-        }
+    for (int i = 0; i < TOPK_MAX; i++) {
+#pragma HLS UNROLL
+        cells[i].best_dist = 3.402823466e+38f;
+        cells[i].best_addr = 0;
+        cells[i].best_len  = 0;
     }
 
     // Stage 2-4: Main Processing
@@ -385,15 +329,11 @@ PQ_PROCESS:
             }
         }
 
-        // Stage 4: Systolic Top-K (banked, round-robin)
-        int bank_id = n % BANKS;
-        systolic_topk_insert_bank(total_dist, doc_addr, doc_len, banks[bank_id]);
+        // Stage 4: Systolic Top-K
+        systolic_topk_insert(total_dist, doc_addr, doc_len, cells);
     }
 
-    // Merge banks into global Top-500
-    TopKCell cells[TOPK_MAX];
-#pragma HLS ARRAY_PARTITION variable=cells complete dim=1
-    merge_banks_to_global(banks, cells);
+
 
     // Stage 5: Push Results → FIFO_RES
     ap_uint<32> push_count = (top_k > 0 && top_k <= TOPK_MAX) ? top_k : (ap_uint<32>)TOPK_MAX;
