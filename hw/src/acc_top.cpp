@@ -36,25 +36,27 @@ void data_manager(
     ap_uint<32> M_val   = hdr_ptr[0];
     ap_uint<32> DIM_val = hdr_ptr[1];
     ap_uint<32> N_val   = hdr_ptr[2];
-    ap_uint<32> Ds_val  = DIM_val / M_val;
+    // 含义2: M/DIM fixed to synth config (M_SYN/DIM_SYN); Header fields are validation-only
+    (void)M_val;
+    (void)DIM_val;
 
     // Step 2: Stream Query from DDR4 → query_fifo
     ap_uint<32>* qptr = (ap_uint<32>*)(dram + qa.to_uint64());
 QRY_READ:
-    for (ap_uint<32> i = 0; i < DIM_val; i++) {
+    for (ap_uint<32> i = 0; i < DIM_SYN; i++) {
 #pragma HLS PIPELINE II=1
         ap_uint<32> raw = qptr[i];
         query_fifo.write(*((float*)&raw));
     }
 
     // Step 3: Compute sizes (uniform KS=256)
-    ap_uint<32> cb_bytes = M_val * KS * Ds_val * 4;
+    ap_uint<32> cb_bytes = M_SYN * KS * DS_SYN * 4;
     ap_uint<32> cb_beats = (cb_bytes + 63) / 64;
-    ap_uint<32> pq_bytes = N_val * (M_val + 16);
+    ap_uint<32> pq_bytes = N_val * ENTRY_BYTES_SYN;
     ap_uint<32> pq_beats = (pq_bytes + 63) / 64;
 
-    meta_out.m_actual   = M_val;
-    meta_out.dim_actual = DIM_val;
+    meta_out.m_actual   = M_SYN;
+    meta_out.dim_actual = DIM_SYN;
     meta_out.n_vectors  = N_val;
     meta_out.top_k      = top_k;
     // meta_out.metric_id set by acc_top before calling data_manager
@@ -81,7 +83,7 @@ QRY_READ:
 
     // Step 5: Stream PQ Codes → FIFO_PQ (512-bit aligned burst reads)
     ap_uint<64> pq_addr = cs + 64 + cb_bytes;
-    ap_uint<32> entry_bytes = M_val + 16;
+    ap_uint<32> entry_bytes = ENTRY_BYTES_SYN;
     ap_uint<512>* pq_beats_ptr = (ap_uint<512>*)(dram + pq_addr.to_uint64());
 PQ_STREAM:
     for (ap_uint<32> n = 0; n < N_val; n++) {
@@ -100,15 +102,15 @@ PQ_STREAM:
         // entry byte M_val+bi → beat bits [511-(M_val+bi)*8 : 511-(M_val+bi)*8-7]
         uint64_t da = 0;
         for (int bi = 0; bi < 8; bi++) {
-            da |= ((uint64_t)beat.range(511 - (M_val + bi)*8,
-                                        511 - (M_val + bi)*8 - 7)) << (bi * 8);
+            da |= ((uint64_t)beat.range(511 - (M_SYN + bi)*8,
+                                        511 - (M_SYN + bi)*8 - 7)) << (bi * 8);
         }
         // doc_len: 4 bytes starting at entry byte M_val+8
         // entry byte M_val+8+bi → beat bits [511-(M_val+8+bi)*8 : 511-(M_val+8+bi)*8-7]
         uint32_t dl = 0;
         for (int bi = 0; bi < 4; bi++) {
-            dl |= ((uint32_t)beat.range(511 - (M_val + 8 + bi)*8,
-                                        511 - (M_val + 8 + bi)*8 - 7)) << (bi * 8);
+            dl |= ((uint32_t)beat.range(511 - (M_SYN + 8 + bi)*8,
+                                        511 - (M_SYN + 8 + bi)*8 - 7)) << (bi * 8);
         }
         beat.range(95, 0) = ((ap_uint<96>)da << 32) | dl;
         pq_fifo.write(beat);
@@ -180,10 +182,7 @@ void adc_engine(
     ap_uint<1>                    reload_codebook
 ) {
 #pragma HLS INLINE off
-    ap_uint<32> M_val   = meta_in.m_actual;
-    ap_uint<32> DIM_val = meta_in.dim_actual;
     ap_uint<32> N_val   = meta_in.n_vectors;
-    ap_uint<32> Ds_val  = DIM_val / M_val;
 
     // Codebook BRAM (KS=256 uniform)
     static float codebook[M_SYN][KS][DS_SYN];
@@ -196,13 +195,13 @@ void adc_engine(
 #pragma HLS ARRAY_PARTITION variable=query complete dim=1
 
 QRY_LOAD:
-    for (ap_uint<32> i = 0; i < DIM_val; i++) {
+    for (ap_uint<32> i = 0; i < DIM_SYN; i++) {
 #pragma HLS PIPELINE II=1
         query[i] = query_fifo.read();
     }
 
     // Load Codebook — sequential float stream, compute address from counter.
-    ap_uint<32> cb_total = M_val * KS * Ds_val;
+    ap_uint<32> cb_total = M_SYN * KS * DS_SYN;
     ap_uint<32> cb_beats = (cb_total * 4 + 63) / 64;
 
 CB_LOAD:
@@ -222,7 +221,7 @@ CB_LOAD:
                     ap_uint<32> rem    = gidx & 0x7FF;
                     ap_uint<8>  k_addr = rem >> 3;
                     ap_uint<4>  d_addr = rem & 0x7;
-                    if (m_addr < M_val) {
+                    if (m_addr < M_SYN) {
                         codebook[m_addr][k_addr][d_addr] = val;
                     }
                 }
