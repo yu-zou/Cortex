@@ -17,9 +17,9 @@
 #define TOPK_INF_KEY     0x7F800000u
 
 // ─── Synthesis parameters (smaller for faster iteration) ───
-#define M_SYN      16
-#define DIM_SYN    128
-#define DS_SYN     (DIM_SYN / M_SYN)  // = 8
+#define M_SYN      24
+#define DIM_SYN    768
+#define DS_SYN     (DIM_SYN / M_SYN)  // = 32
 
 // ─── PQ Entry format ───
 #define ENTRY_BYTES_SYN  (M_SYN + 16)

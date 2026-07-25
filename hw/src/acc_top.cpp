@@ -190,6 +190,9 @@ void adc_engine(
 #pragma HLS ARRAY_PARTITION variable=codebook complete dim=1
 #pragma HLS ARRAY_PARTITION variable=codebook complete dim=3
 
+    static float dist_table[M_SYN][KS];
+#pragma HLS ARRAY_PARTITION variable=dist_table complete dim=1
+
     // Query registers
     float query[DIM_SYN];
 #pragma HLS ARRAY_PARTITION variable=query complete dim=1
@@ -216,17 +219,30 @@ CB_LOAD:
                 if (gidx < cb_total) {
                     ap_uint<32> raw = beat.range(32*f+31, 32*f);
                     float val = *((float*)&raw);
-                    // M_SYN=16, DS_SYN=8: per_m = 256*8 = 2048.
-                    ap_uint<5>  m_addr = gidx >> 11;
-                    ap_uint<32> rem    = gidx & 0x7FF;
-                    ap_uint<8>  k_addr = rem >> 3;
-                    ap_uint<4>  d_addr = rem & 0x7;
+                    // M_SYN=24, DS_SYN=32: per_m = KS*DS_SYN = 8192.
+                    ap_uint<6>  m_addr = gidx >> 13;
+                    ap_uint<32> rem    = gidx & 0x1FFF;
+                    ap_uint<8>  k_addr = rem >> 5;
+                    ap_uint<5>  d_addr = rem & 0x1F;
                     if (m_addr < M_SYN) {
                         codebook[m_addr][k_addr][d_addr] = val;
                     }
                 }
             }
             counter += 16;
+        }
+    }
+
+DIST_TABLE_BUILD:
+    for (int c = 0; c < KS; c++) {
+        for (int m = 0; m < M_SYN; m++) {
+#pragma HLS PIPELINE II=1
+            float acc = 0.0f;
+            for (int d = 0; d < DS_SYN; d++) {
+#pragma HLS UNROLL
+                acc += sub_dist_l2(query[m * DS_SYN + d], codebook[m][c][d]);
+            }
+            dist_table[m][c] = acc;
         }
     }
 
@@ -252,21 +268,43 @@ PQ_PROCESS:
                                         ENTRY_BITS_SYN - 8 - m*8);
         }
 
-        float total_dist = 0.0f;
-    ADC_M:
+        float part[M_SYN];
+#pragma HLS ARRAY_PARTITION variable=part complete dim=1
+    DIST_LOOKUP:
         for (int m = 0; m < M_SYN; m++) {
 #pragma HLS UNROLL
-            ap_uint<8> c = pq_codes[m];
-            float sub = 0.0f;
-        ADC_D:
-            for (int d = 0; d < DS_SYN; d++) {
-#pragma HLS UNROLL
-                float cent  = codebook[m][c][d];
-                float q_sub = query[m * DS_SYN + d];
-                sub += sub_dist_l2(q_sub, cent);
-            }
-            total_dist += sub;
+            part[m] = dist_table[m][pq_codes[m]];
         }
+
+        float l1[12];
+#pragma HLS ARRAY_PARTITION variable=l1 complete dim=1
+    DIST_SUM_L1:
+        for (int i = 0; i < 12; i++) {
+#pragma HLS UNROLL
+            l1[i] = part[2*i] + part[2*i + 1];
+        }
+
+        float l2[6];
+#pragma HLS ARRAY_PARTITION variable=l2 complete dim=1
+    DIST_SUM_L2:
+        for (int i = 0; i < 6; i++) {
+#pragma HLS UNROLL
+            l2[i] = l1[2*i] + l1[2*i + 1];
+        }
+
+        float l3[3];
+#pragma HLS ARRAY_PARTITION variable=l3 complete dim=1
+    DIST_SUM_L3:
+        for (int i = 0; i < 3; i++) {
+#pragma HLS UNROLL
+            l3[i] = l2[2*i] + l2[2*i + 1];
+        }
+
+        float l4[2];
+#pragma HLS ARRAY_PARTITION variable=l4 complete dim=1
+        l4[0] = l3[0] + l3[1];
+        l4[1] = l3[2];
+        float total_dist = l4[0] + l4[1];
 
         ap_uint<32> dist_key = *((ap_uint<32>*)&total_dist);
         cand_out.write(pack_topk_candidate(dist_key, doc_addr, doc_len));
