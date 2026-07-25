@@ -235,9 +235,9 @@ CB_LOAD:
 
 DIST_TABLE_BUILD:
     for (int c = 0; c < KS; c++) {
-        for (int mg = 0; mg < M_SYN; mg += 12) {
+        for (int mg = 0; mg < M_SYN; mg += 24) {
 #pragma HLS PIPELINE II=1
-            for (int i = 0; i < 12; i++) {
+            for (int i = 0; i < 24; i++) {
 #pragma HLS UNROLL
                 int m = mg + i;
                 float acc = 0.0f;
