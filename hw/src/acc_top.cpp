@@ -187,7 +187,7 @@ void adc_engine(
     // Codebook BRAM (KS=256 uniform)
     static float codebook[M_SYN][KS][DS_SYN];
 #pragma HLS RESOURCE variable=codebook core=RAM_2P_BRAM
-#pragma HLS ARRAY_PARTITION variable=codebook complete dim=1
+#pragma HLS ARRAY_PARTITION variable=codebook block factor=4 dim=1
 #pragma HLS ARRAY_PARTITION variable=codebook complete dim=3
 
     static float dist_table[M_SYN][KS];
@@ -242,7 +242,6 @@ DIST_TABLE_BUILD:
                 int m = mg + i;
                 float acc = 0.0f;
                 for (int d = 0; d < DS_SYN; d++) {
-#pragma HLS UNROLL factor=16
                     acc += sub_dist_l2(query[m * DS_SYN + d], codebook[m][c][d]);
                 }
                 dist_table[m][c] = acc;
