@@ -1,4 +1,4 @@
-open_project acc_top_proj -reset
+open_project acc_top_proj
 set_top acc_top
 
 add_files src/acc_top.cpp
