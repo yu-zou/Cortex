@@ -491,5 +491,3 @@ void acc_top(
 #endif
 }
 
-
-// HNSW search engine removed — compute_engine is the only execution path
