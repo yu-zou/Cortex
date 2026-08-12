@@ -66,10 +66,10 @@ QRY_READ:
     // Use 512-bit aligned burst reads. Each beat = 16 FP32 floats.
     // Codebook layout: [m=0][k=0..255][d=0..Ds-1], [m=1][k=0..255][d=0..Ds-1], ...
     // POWER-OF-2 optimization: per_m = 256*8=2048, Ds_val=8
-    //   m   = gidx / per_m  →  gidx >> 11
-    //   rem = gidx % per_m  →  gidx & 0x7FF
-    //   k   = rem / Ds_val  →  rem >> 3
-    //   d   = rem % Ds_val  →  rem & 0x7
+    //   m   = gidx / per_m  →  gidx >> 13
+    //   rem = gidx % per_m  →  gidx & 0x1FFF
+    //   k   = rem / DS_SYN  →  rem >> 5
+    //   d   = rem % DS_SYN  →  rem & 0x1F
     // Step 4: Stream Codebook → FIFO_CB (raw 16 FP32 floats per beat, sequential)
     ap_uint<64> cb_addr = cs + 64;
     ap_uint<512>* cb_beats_ptr = (ap_uint<512>*)(dram + cb_addr.to_uint64());
@@ -216,11 +216,11 @@ CB_LOAD:
                 if (gidx < cb_total) {
                     ap_uint<32> raw = beat.range(32*f+31, 32*f);
                     float val = *((float*)&raw);
-                    // M_SYN=16, DS_SYN=8: per_m = 256*8 = 2048.
-                    ap_uint<5>  m_addr = gidx >> 11;
-                    ap_uint<32> rem    = gidx & 0x7FF;
-                    ap_uint<8>  k_addr = rem >> 3;
-                    ap_uint<4>  d_addr = rem & 0x7;
+                    // M_SYN=24, DS_SYN=32: per_m = 256*32 = 8192.
+                    ap_uint<6>  m_addr = gidx >> 13;
+                    ap_uint<32> rem    = gidx & 0x1FFF;
+                    ap_uint<8>  k_addr = rem >> 5;
+                    ap_uint<5>  d_addr = rem & 0x1F;
                     if (m_addr < M_SYN) {
                         codebook[m_addr][k_addr][d_addr] = val;
                     }
