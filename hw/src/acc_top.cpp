@@ -187,7 +187,7 @@ void adc_engine(
     // Codebook BRAM (KS=256 uniform)
     static float codebook[M_SYN][KS][DS_SYN];
 #pragma HLS RESOURCE variable=codebook core=RAM_2P_BRAM
-#pragma HLS ARRAY_PARTITION variable=codebook block factor=4 dim=1
+#pragma HLS ARRAY_PARTITION variable=codebook cyclic factor=4 dim=1
 #pragma HLS ARRAY_PARTITION variable=codebook complete dim=3
 
     static float dist_table[M_SYN][KS];
