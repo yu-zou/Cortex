@@ -321,26 +321,37 @@ void topk_engine(
     ap_uint<32>                          top_k
 ) {
 #pragma HLS INLINE off
-    topk_candidate_word_t cells[TOPK_MAX];
-#pragma HLS ARRAY_PARTITION variable=cells complete dim=1
+    ap_uint<32> keys[TOPK_MAX];
+    ap_uint<13> idx[TOPK_MAX];
+#pragma HLS ARRAY_PARTITION variable=keys complete dim=1
+#pragma HLS ARRAY_PARTITION variable=idx complete dim=1
+    ap_uint<96> payload[8192];
+#pragma HLS RESOURCE variable=payload core=RAM_1P_BRAM
 
 TOPK_INIT:
     for (int i = 0; i < TOPK_MAX; i++) {
 #pragma HLS PIPELINE II=1
-        cells[i] = pack_topk_candidate(TOPK_INF_KEY, 0, 0);
+        keys[i] = TOPK_INF_KEY;
+        idx[i] = 0;
     }
 
 TOPK_PROCESS:
     for (ap_uint<32> n = 0; n < n_total; n++) {
 #pragma HLS PIPELINE II=1
         topk_candidate_word_t cand = cand_in.read();
+        ap_uint<32> cd = cand.range(31, 0);
+        ap_uint<13> ci = n.range(12, 0);
+        payload[n.range(12, 0)] = cand.range(127, 32);
     TOPK_CHAIN:
         for (int i = 0; i < TOPK_MAX; i++) {
 #pragma HLS UNROLL
-            if (cand.range(31, 0) < cells[i].range(31, 0)) {
-                topk_candidate_word_t tmp = cells[i];
-                cells[i] = cand;
-                cand = tmp;
+            if (cd < keys[i]) {
+                ap_uint<32> tk = keys[i];
+                keys[i] = cd;
+                cd = tk;
+                ap_uint<13> ti = idx[i];
+                idx[i] = ci;
+                ci = ti;
             }
         }
     }
@@ -349,7 +360,10 @@ TOPK_PROCESS:
 RESULT_PUSH:
     for (ap_uint<32> i = 0; i < push_count; i++) {
 #pragma HLS PIPELINE II=1
-        res_out.write(cells[i]);
+        res_word_t r;
+        r.range(31, 0) = keys[i];
+        r.range(127, 32) = payload[idx[i]];
+        res_out.write(r);
     }
 }
 
