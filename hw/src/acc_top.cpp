@@ -195,7 +195,7 @@ void adc_engine(
 
     // Query registers
     float query[DIM_SYN];
-#pragma HLS ARRAY_PARTITION variable=query complete dim=1
+#pragma HLS ARRAY_PARTITION variable=query block factor=24 dim=1
 
 QRY_LOAD:
     for (ap_uint<32> i = 0; i < DIM_SYN; i++) {
