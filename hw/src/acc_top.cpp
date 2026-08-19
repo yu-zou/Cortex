@@ -235,11 +235,11 @@ CB_LOAD:
 
 DIST_TABLE_BUILD:
     for (int c = 0; c < KS; c++) {
-        for (int mg = 0; mg < M_SYN; mg += 2) {
+        for (int mg = 0; mg < 6; mg++) {
 #pragma HLS PIPELINE II=1
-            for (int i = 0; i < 2; i++) {
+            for (int b = 0; b < 4; b++) {
 #pragma HLS UNROLL
-                int m = mg + i;
+                int m = mg * 4 + b;
                 float acc = 0.0f;
                 for (int d = 0; d < DS_SYN; d++) {
                     acc += sub_dist_l2(query[m * DS_SYN + d], codebook[m][c][d]);
