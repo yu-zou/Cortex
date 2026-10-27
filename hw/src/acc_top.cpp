@@ -14,7 +14,7 @@ void data_manager(
     ap_uint<1>                 reload_codebook,
     ap_uint<32>                top_k,
     hls::stream<cb_pq_word_t> &cb_fifo,
-    hls::stream<cb_pq_word_t> &pq_fifo,
+    hls::stream<pq_entry_word_t> &pq_fifo,
     hls::stream<float>        &query_fifo,
     hls::stream<res_word_t>   &res_fifo_in,
     hls::stream<axis_result_pkt_t> &axis_result,
@@ -52,8 +52,8 @@ QRY_READ:
     // Step 3: Compute sizes (uniform KS=256)
     ap_uint<32> cb_bytes = M_SYN * KS * DS_SYN * 4;
     ap_uint<32> cb_beats = (cb_bytes + 63) / 64;
-    ap_uint<32> pq_bytes = N_val * ENTRY_BYTES_SYN;
-    ap_uint<32> pq_beats = (pq_bytes + 63) / 64;
+    ap_uint<32> pq_bytes = N_val * ENTRY_BYTES_PAD;   // 每条 entry 128 字节 (2 beat)
+    ap_uint<32> pq_beats = N_val * ENTRY_BEATS_SYN;   // 每条 entry 2 beat
 
     meta_out.m_actual   = M_SYN;
     meta_out.dim_actual = DIM_SYN;
@@ -82,38 +82,28 @@ QRY_READ:
     }
 
     // Step 5: Stream PQ Codes → FIFO_PQ (512-bit aligned burst reads)
+    // M=96: entry = 112 bytes > 64 bytes → 2 beats per entry (128 bytes)
+    //   beat0 = codes[0..63]  (full 64 bytes)
+    //   beat1 = codes[64..95] (32 bytes) + doc_addr(8B) + doc_len(4B) + pad(20B)
     ap_uint<64> pq_addr = cs + 64 + cb_bytes;
     ap_uint<32> entry_bytes = ENTRY_BYTES_SYN;
     ap_uint<512>* pq_beats_ptr = (ap_uint<512>*)(dram + pq_addr.to_uint64());
 PQ_STREAM:
     for (ap_uint<32> n = 0; n < N_val; n++) {
 #pragma HLS PIPELINE II=1
-        // Each PQ entry occupies exactly 1 beat (M_val+16 ≤ 64 bytes).
-        // Entries stored sequentially at 64-byte boundaries in DRAM.
-        cb_pq_word_t beat = 0;
-        beat = pq_beats_ptr[n];
-        
-        // Pre-extract doc_addr/doc_len from beat's known byte positions
-        // PQ entry layout (LE byte order at HIGH bits of beat):
-        //   bytes 0..M_val-1: PQ codes
-        //   bytes M_val..M_val+7: doc_addr (8 bytes, LE)
-        //   bytes M_val+8..M_val+11: doc_len (4 bytes low, LE)
-        // doc_addr: 8 bytes starting at entry byte M_val
-        // entry byte M_val+bi → beat bits [511-(M_val+bi)*8 : 511-(M_val+bi)*8-7]
-        uint64_t da = 0;
-        for (int bi = 0; bi < 8; bi++) {
-            da |= ((uint64_t)beat.range(511 - (M_SYN + bi)*8,
-                                        511 - (M_SYN + bi)*8 - 7)) << (bi * 8);
-        }
-        // doc_len: 4 bytes starting at entry byte M_val+8
-        // entry byte M_val+8+bi → beat bits [511-(M_val+8+bi)*8 : 511-(M_val+8+bi)*8-7]
-        uint32_t dl = 0;
-        for (int bi = 0; bi < 4; bi++) {
-            dl |= ((uint32_t)beat.range(511 - (M_SYN + 8 + bi)*8,
-                                        511 - (M_SYN + 8 + bi)*8 - 7)) << (bi * 8);
-        }
-        beat.range(95, 0) = ((ap_uint<96>)da << 32) | dl;
-        pq_fifo.write(beat);
+        cb_pq_word_t beat0 = pq_beats_ptr[2*n];
+        cb_pq_word_t beat1 = pq_beats_ptr[2*n + 1];
+
+        // metadata in beat1: doc_addr at bits[255:192], doc_len at bits[191:160]
+        ap_uint<64> da = beat1.range(255, 192);
+        ap_uint<32> dl = beat1.range(191, 160);
+
+        // pass metadata to compute via beat1 low 96 bits (same convention as before)
+        beat1.range(95, 0) = ((ap_uint<96>)da << 32) | dl;
+
+        // merge 2 beats into 1×1024-bit entry: beat0 low 512, beat1 high 512
+        pq_entry_word_t entry = ((pq_entry_word_t)beat1 << 512) | (pq_entry_word_t)beat0;
+        pq_fifo.write(entry);
     }
 
     // Step 6: Write Results (Compute Engine → res_fifo_in → DRAM)
@@ -175,7 +165,7 @@ static topk_candidate_word_t pack_topk_candidate(
 
 void adc_engine(
     hls::stream<cb_pq_word_t>    &cb_fifo,
-    hls::stream<cb_pq_word_t>    &pq_fifo,
+    hls::stream<pq_entry_word_t>    &pq_fifo,
     hls::stream<float>           &query_fifo,
     hls::stream<topk_candidate_word_t> &cand_out,
     ComputeMeta                   meta_in,
@@ -187,7 +177,8 @@ void adc_engine(
     // Codebook BRAM (KS=256 uniform)
     static float codebook[M_SYN][KS][DS_SYN];
 #pragma HLS RESOURCE variable=codebook core=RAM_2P_BRAM
-#pragma HLS ARRAY_PARTITION variable=codebook cyclic factor=4 dim=1
+#pragma HLS ARRAY_PARTITION variable=codebook cyclic factor=16 dim=1
+#pragma HLS ARRAY_PARTITION variable=codebook cyclic factor=2 dim=2
 #pragma HLS ARRAY_PARTITION variable=codebook complete dim=3
 
     static float dist_table[M_SYN][KS];
@@ -195,7 +186,7 @@ void adc_engine(
 
     // Query registers
     float query[DIM_SYN];
-#pragma HLS ARRAY_PARTITION variable=query block factor=24 dim=1
+#pragma HLS ARRAY_PARTITION variable=query block factor=96 dim=1
 
 QRY_LOAD:
     for (ap_uint<32> i = 0; i < DIM_SYN; i++) {
@@ -219,11 +210,11 @@ CB_LOAD:
                 if (gidx < cb_total) {
                     ap_uint<32> raw = beat.range(32*f+31, 32*f);
                     float val = *((float*)&raw);
-                    // M_SYN=24, DS_SYN=32: per_m = KS*DS_SYN = 8192.
-                    ap_uint<6>  m_addr = gidx >> 13;
-                    ap_uint<32> rem    = gidx & 0x1FFF;
-                    ap_uint<8>  k_addr = rem >> 5;
-                    ap_uint<5>  d_addr = rem & 0x1F;
+                    // M_SYN=96, DS_SYN=8: per_m = KS*DS_SYN = 2048.
+                    ap_uint<7>  m_addr = gidx >> 11;
+                    ap_uint<32> rem    = gidx & 0x7FF;
+                    ap_uint<8>  k_addr = rem >> 3;
+                    ap_uint<3>  d_addr = rem & 0x7;
                     if (m_addr < M_SYN) {
                         codebook[m_addr][k_addr][d_addr] = val;
                     }
@@ -235,11 +226,11 @@ CB_LOAD:
 
 DIST_TABLE_BUILD:
     for (int c = 0; c < KS; c++) {
-        for (int mg = 0; mg < 6; mg++) {
+        for (int mg = 0; mg < (M_SYN / 16); mg++) {
 #pragma HLS PIPELINE II=1
-            for (int b = 0; b < 4; b++) {
+            for (int b = 0; b < 16; b++) {
 #pragma HLS UNROLL
-                int m = mg * 4 + b;
+                int m = mg * 16 + b;
                 float acc = 0.0f;
                 for (int d = 0; d < DS_SYN; d++) {
                     acc += sub_dist_l2(query[m * DS_SYN + d], codebook[m][c][d]);
@@ -252,23 +243,25 @@ DIST_TABLE_BUILD:
 PQ_PROCESS:
     for (ap_uint<32> n = 0; n < N_val; n++) {
 #pragma HLS PIPELINE II=1
-        cb_pq_word_t beat = pq_fifo.read();
-        ap_uint<512> raw  = beat;
+        pq_entry_word_t entry = pq_fifo.read();
+        cb_pq_word_t beat0 = entry.range(511, 0);
+        cb_pq_word_t beat1 = entry.range(1023, 512);
 
-        // Right-align fixed synthesis entry width: M_SYN PQ bytes + 16 metadata bytes.
-        ap_uint<512> shifted = raw >> (512 - ENTRY_BITS_SYN);
+        // metadata from beat1 low 96 bits (pre-extracted by DM)
+        ap_uint<64> doc_addr = beat1.range(95, 32);
+        ap_uint<32> doc_len  = beat1.range(31, 0);
 
-        // DM pre-extracted doc_addr/doc_len → read directly from low 96 bits.
-        ap_uint<64> doc_addr = beat.range(95, 32);
-        ap_uint<32> doc_len  = beat.range(31, 0);
-
-        // PQ codes: compile-time bit positions avoid runtime variable part-selects.
+        // codes: beat0 = codes[0..63] (full 64 bytes, LE at HIGH bits)
+        //        beat1 = codes[64..95] at HIGH 32 bytes (bits 511..256)
         ap_uint<8> pq_codes[M_SYN];
 #pragma HLS ARRAY_PARTITION variable=pq_codes complete dim=1
-        for (int m = 0; m < M_SYN; m++) {
+        for (int m = 0; m < 64; m++) {
 #pragma HLS UNROLL
-            pq_codes[m] = shifted.range(ENTRY_BITS_SYN - 1 - m*8,
-                                        ENTRY_BITS_SYN - 8 - m*8);
+            pq_codes[m] = beat0.range(511 - m*8, 511 - m*8 - 7);
+        }
+        for (int m = 64; m < M_SYN; m++) {
+#pragma HLS UNROLL
+            pq_codes[m] = beat1.range(511 - (m-64)*8, 511 - (m-64)*8 - 7);
         }
 
         float part[M_SYN];
@@ -279,35 +272,48 @@ PQ_PROCESS:
             part[m] = dist_table[m][pq_codes[m]];
         }
 
-        float l1[12];
+        // Tree reduction: 96 → 48 → 24 → 12 → 6 → 3 → 1
+        float l1[48];
 #pragma HLS ARRAY_PARTITION variable=l1 complete dim=1
     DIST_SUM_L1:
-        for (int i = 0; i < 12; i++) {
+        for (int i = 0; i < 48; i++) {
 #pragma HLS UNROLL
             l1[i] = part[2*i] + part[2*i + 1];
         }
 
-        float l2[6];
+        float l2[24];
 #pragma HLS ARRAY_PARTITION variable=l2 complete dim=1
     DIST_SUM_L2:
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 24; i++) {
 #pragma HLS UNROLL
             l2[i] = l1[2*i] + l1[2*i + 1];
         }
 
-        float l3[3];
+        float l3[12];
 #pragma HLS ARRAY_PARTITION variable=l3 complete dim=1
     DIST_SUM_L3:
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 12; i++) {
 #pragma HLS UNROLL
             l3[i] = l2[2*i] + l2[2*i + 1];
         }
 
-        float l4[2];
+        float l4[6];
 #pragma HLS ARRAY_PARTITION variable=l4 complete dim=1
-        l4[0] = l3[0] + l3[1];
-        l4[1] = l3[2];
-        float total_dist = l4[0] + l4[1];
+    DIST_SUM_L4:
+        for (int i = 0; i < 6; i++) {
+#pragma HLS UNROLL
+            l4[i] = l3[2*i] + l3[2*i + 1];
+        }
+
+        float l5[3];
+#pragma HLS ARRAY_PARTITION variable=l5 complete dim=1
+    DIST_SUM_L5:
+        for (int i = 0; i < 3; i++) {
+#pragma HLS UNROLL
+            l5[i] = l4[2*i] + l4[2*i + 1];
+        }
+
+        float total_dist = (l5[0] + l5[1]) + l5[2];
 
         ap_uint<32> dist_key = *((ap_uint<32>*)&total_dist);
         cand_out.write(pack_topk_candidate(dist_key, doc_addr, doc_len));
@@ -369,7 +375,7 @@ RESULT_PUSH:
 
 void compute_engine(
     hls::stream<cb_pq_word_t> &cb_fifo,
-    hls::stream<cb_pq_word_t> &pq_fifo,
+    hls::stream<pq_entry_word_t> &pq_fifo,
     hls::stream<res_word_t>   &res_fifo_out,
     hls::stream<float>        &query_fifo,
     ComputeMeta                 meta_in,
@@ -476,7 +482,7 @@ void acc_top(
 
     // Internal FIFOs
     static hls::stream<cb_pq_word_t> fifo_cb("fifo_cb");
-    static hls::stream<cb_pq_word_t> fifo_pq("fifo_pq");
+    static hls::stream<pq_entry_word_t> fifo_pq("fifo_pq");
     static hls::stream<res_word_t>   fifo_res("fifo_res");
     static hls::stream<float>        fifo_qry("fifo_qry");
 #pragma HLS STREAM variable=fifo_cb  depth=256

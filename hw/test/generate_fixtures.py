@@ -61,18 +61,30 @@ def compute_codes(pq, base_vecs):
         return unpacked.astype(np.uint8)
     return raw.reshape(base_vecs.shape[0], -1)
 
-def compute_adc_distances(queries, codebook, codes):
-    """ADC L2距离: 对每个query, 查表累加"""
+def compute_adc_distances(queries, codebook, codes, centroids, assignments):
+    """残差 ADC L2 距离（残差 IVFPQ / IVFADC）:
+    对每个 query q，每个向量 x（在 cluster c = assignments[x]）:
+      ADC = sum_m || (q - centroid[c])_m - codebook[m][codes[x][m]] ||²
+    dist_table 从 query 残差 r_c = q - centroid[c] 构建，是 per-cluster 的。"""
+    n_clusters = centroids.shape[0]
     distances = np.empty((queries.shape[0], codes.shape[0]), dtype=np.float32)
     for qi in range(queries.shape[0]):
-        table = np.empty((M, KS), dtype=np.float32)
-        for m in range(M):
-            sub = queries[qi, m * DSUB:(m + 1) * DSUB]
-            diff = codebook[m] - sub[None, :]
-            table[m] = np.sum(diff * diff, axis=1)
+        q = queries[qi]
         row = np.zeros(codes.shape[0], dtype=np.float32)
-        for m in range(M):
-            row += table[m][codes[:, m]]
+        for c in range(n_clusters):
+            q_res = q - centroids[c]          # query 残差 r_c = q - centroid[c]
+            # dist_table[m][k] = || q_res[m] - codebook[m][k] ||²
+            table = np.empty((M, KS), dtype=np.float32)
+            for m in range(M):
+                sub = q_res[m * DSUB:(m + 1) * DSUB]
+                diff = codebook[m] - sub[None, :]
+                table[m] = np.sum(diff * diff, axis=1)
+            idx = np.where(assignments == c)[0]
+            for vi in idx:
+                adc = 0.0
+                for m in range(M):
+                    adc += table[m][codes[vi, m]]
+                row[vi] = adc
         distances[qi] = row
     return distances
 
@@ -118,15 +130,22 @@ def generate():
     base_vecs = as_float32(np.random.randn(NUM_VECTORS, DIM))
     queries = as_float32(np.random.randn(NUM_QUERIES, DIM))
 
-    pq, codebook = train_pq(base_vecs)
-    codes = compute_codes(pq, base_vecs)
-    distances = compute_adc_distances(queries, codebook, codes)
-
+    # 1. 粗量化 kmeans FIRST（残差依赖 cluster 归属）
     centroids = kmeans_centroids(base_vecs)
     assign_index = faiss.IndexFlatL2(DIM)
     assign_index.add(centroids)
     _, assignments = assign_index.search(base_vecs, 1)
     assignments = assignments.reshape(-1)
+
+    # 2. 残差 r_i = x_i - centroid[cluster(x_i)]
+    residuals = base_vecs - centroids[assignments]
+
+    # 3. PQ 在残差上训练 + 编码（残差 IVFPQ，对齐真实数据 Faiss by_residual=true）
+    pq, codebook = train_pq(residuals)
+    codes = compute_codes(pq, residuals)
+
+    # 4. 残差 ADC golden：dist_table 从 query 残差 r_c = q - centroid[c] 构建（per-cluster）
+    distances = compute_adc_distances(queries, codebook, codes, centroids, assignments)
 
     write_bin(os.path.join(out_dir, "codebook.bin"), codebook.reshape(-1))
     write_bin(os.path.join(out_dir, "vectors.bin"), codes.reshape(-1))
@@ -143,6 +162,8 @@ def generate():
         f.write(b"".join(topk_payload))
 
     write_bin(os.path.join(out_dir, "centroids.bin"), centroids.reshape(-1))
+    write_bin(os.path.join(out_dir, "assignments.bin"),
+              np.asarray(assignments, dtype=np.int32))
 
     for cluster_id in range(4):
         cluster_indices = np.where(assignments == cluster_id)[0]
@@ -180,8 +201,10 @@ def verify():
     codebook = read_float_bin(os.path.join(out_dir, "codebook.bin")).reshape(M, KS, DSUB)
     codes = read_uint8_bin(os.path.join(out_dir, "vectors.bin")).reshape(NUM_VECTORS, M)
     queries = read_float_bin(os.path.join(out_dir, "queries.bin")).reshape(NUM_QUERIES, DIM)
+    centroids = read_float_bin(os.path.join(out_dir, "centroids.bin")).reshape(-1, DIM)
+    assignments = np.fromfile(os.path.join(out_dir, "assignments.bin"), dtype=np.int32)
     golden = read_float_bin(os.path.join(out_dir, "golden_distances.bin")).reshape(NUM_QUERIES, NUM_VECTORS)
-    recomputed = compute_adc_distances(queries, codebook, codes)
+    recomputed = compute_adc_distances(queries, codebook, codes, centroids, assignments)
     if not np.allclose(recomputed, golden, rtol=0, atol=1e-6):
         delta = np.abs(recomputed - golden)
         qi, vi = np.unravel_index(np.argmax(delta), delta.shape)
