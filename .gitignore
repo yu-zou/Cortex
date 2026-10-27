@@ -30,3 +30,11 @@ Thumbs.db
 # === Internal tool files ===
 .sisyphus/
 .omo/
+
+# === Python / model artifacts ===
+__pycache__/
+*.pyc
+.pytest_cache/
+model/data/
+*.npz
+*.bin
