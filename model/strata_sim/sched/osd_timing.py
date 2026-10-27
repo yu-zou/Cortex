@@ -69,7 +69,7 @@ class OSDHardwareProfile:
     # buffering).  The board data path can start scanning cluster i while
     # cluster i+1 is still arriving; without this the model serialises
     # load-then-scan and overstates the query time by the FPGA share.
-    board_pipeline_scan: bool = field(default_factory=lambda: __import__('os').environ.get('OSD_PIPELINE', '1') == '1')
+    board_pipeline_scan: bool = field(default_factory=lambda: __import__('os').environ.get('OSD_PIPELINE', '0') == '1')
     response_bytes_per_result: int = 16
     bram_capacity_slots: int = 4
     # DDR cluster cache capacity.  Clusters are accounted at
