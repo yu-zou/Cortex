@@ -47,6 +47,18 @@ All are derived from the indexed corpus and are excluded by `.gitignore`
 `scripts/gen_2p5b_v2.py` reads that spec plus `assign.npy` and emits the
 2.39B one (`data/derived/workload_1b_mt/*.npz`, `data/derived/workload_2p5b/*.npz`).
 
+## What the model assumes
+
+- **Raw vectors live on the board SSD**, not in DDR. Exact rerank fetches `m`
+  candidates per cluster (`RERANK`, default 64) on demand and pays the SSD
+  path (`L_cmd + C/B_ssd + C/B_ddr`); there is no raw-residency assumption.
+  The 2 GiB raw region is only an LRU budget for those fetches.
+- **Rerank runs on the workstation host CPU**, `cores_per_host / boards_per_host`
+  = 2 cores per OSD, after the candidates cross PCIe. The board's ARM core is
+  not modelled.
+- A subquery is complete when the OSD returns its top-k; the client waits for
+  all 32 sub-queries (barrier), so query latency is the max, not the sum.
+
 ## Run
 
 `rep_v2.py` is env-knob driven (no CLI flags) and must be run from `model/`:
