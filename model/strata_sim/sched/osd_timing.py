@@ -523,11 +523,9 @@ class OSDTimingModel:
             cursor = _book(
                 self.engine, res.pcie, task_id, pcie_ns, cursor,
                 payload_bytes=pq_bytes, booked=booked)
-            # DDR write
-            ddr_ns = _ceil_div(pq_bytes, hw.ddr_bytes_per_ns)
-            cursor = _book(
-                self.engine, res.ddr, task_id, ddr_ns, cursor,
-                payload_bytes=pq_bytes, booked=booked)
+            # NOTE: no separate DDR-write term.  ``ssd_to_ddr_bytes_per_ns``
+            # is the measured end-to-end SSD->PL DDR4 rate, so C/B_ssd already
+            # contains the write; charging C/B_ddr again would double count.
             self._pq_clusters[cid] = pq_bytes
             self._pq_bytes += pq_bytes
             ddr_transfer_count += 1
@@ -767,10 +765,7 @@ class OSDTimingModel:
                 cursor = _book(
                     self.engine, res.pcie, task_id, pcie_ns, cursor,
                     payload_bytes=raw_bytes, booked=booked)
-                ddr_ns = _ceil_div(raw_bytes, hw.ddr_bytes_per_ns)
-                cursor = _book(
-                    self.engine, res.ddr, task_id, ddr_ns, cursor,
-                    payload_bytes=raw_bytes, booked=booked)
+                # Same end-to-end rate as stage 1: the write is inside it.
                 self._raw_clusters[cid] = raw_bytes
                 self._raw_bytes += raw_bytes
                 raw_transfers += 1
