@@ -30,6 +30,13 @@ from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Sequence
 
 from strata_sim.contracts.schema import TILE_MAX_DOCS, ContractError
+
+# Query read (QRY_READ 769) + distance-table build (DIST_TABLE_BUILD 1,613),
+# measured in csynth, overlapping to a fitted 2,211 cycles.  These do not
+# depend on the document batch, so a second tile of the SAME cluster can skip
+# them -- but the RTL as implemented rebuilds them on every call, so reuse is
+# opt-in (OSD_TABLE_REUSE=1) and off by default.
+TABLE_BUILD_CYCLES = 2211.0
 from strata_sim.des.engine import DesEngine
 from strata_sim.des.resources import Reservation, ResourceKind
 
@@ -636,6 +643,7 @@ class OSDTimingModel:
         fpga_tiles = 0
         fpga_cycles = 0.0
         remaining = n_docs
+        _reuse_table = os.environ.get("OSD_TABLE_REUSE", "0") == "1"
         while remaining > 0:
             tile_docs = min(remaining, TILE_MAX_DOCS)
             _compute_cyc = self.fpga.predict_cycles(
@@ -651,6 +659,10 @@ class OSDTimingModel:
                 _compute_cyc = max(
                     _compute_cyc,
                     _compute_cyc - _proc_cyc * tile_docs + _mem_cyc)
+            if _reuse_table and fpga_tiles > 0:
+                # Query read + distance table are per (query, codebook), not
+                # per tile: only the first tile of a cluster pays them.
+                _compute_cyc = max(1.0, _compute_cyc - TABLE_BUILD_CYCLES)
             fpga_cycles += _compute_cyc
             remaining -= tile_docs
             fpga_tiles += 1

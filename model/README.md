@@ -68,7 +68,8 @@ cd model
 # 4,000-query multi-tenant run, FIFO, CRUSH placement:
 V2_PLACEMENT=crush python3 scripts/rep_v2.py
 # knobs (env): V2_SCALE, V2_K, NUM_OSDS, V2_PLACEMENT=crush|roundrobin,
-#   B_SSD_GBPS, B_DDR_GBPS, BRAM_SLOTS, V2_WINDOW, V2_SPEC ...
+#   B_SSD_GBPS, B_DDR_GBPS, BRAM_SLOTS, V2_WINDOW, V2_SPEC,
+#   OSD_PIPELINE=0 (serial, default) | 1 (overlap), OSD_TABLE_REUSE=1 ...
 ```
 
 Sanity test — this one needs no inputs, only the standard library:
