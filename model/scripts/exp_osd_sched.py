@@ -109,7 +109,7 @@ STATUS_BLOCKED = "blocked"
 STATUS_COMPLETE = "complete"
 STATUS_FIXTURE = "fixture"
 
-STRATEGIES = ("fifo", "spt", "edf", "drr", "multifactor", "batch")
+STRATEGIES = ("fifo", "spt", "edf", "drr", "multifactor", "batch", "lstf")
 EXIT_OK = 0
 EXIT_CONFIG = 2
 EXIT_BLOCKED = 4

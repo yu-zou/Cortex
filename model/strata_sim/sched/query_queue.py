@@ -33,6 +33,7 @@ class QueueStrategy(str, Enum):
     DRR = "drr"
     BATCH = "batch"
     CGB = "cgb"  # Cluster-Group Batching
+    LSTF = "lstf"  # Least-Slack-Time-First (physical units, no weights)
 
 
 def _nonempty(name: str, value: str) -> None:
@@ -157,6 +158,17 @@ class QueryQueue:
         miss = int(round((1.0 - float(query.ddr_hit_probability)) * self.miss_penalty_ns))
         return now_ns + queue_delay + query.estimated_compute_ns + miss
 
+    def _slack_ns(self, query: QueuedQuery, now_ns: int = 0) -> int:
+        """Slack in nanoseconds: how long this query can still wait.
+
+        deadline_ns is None (no SLO) => treated as infinite slack, so the
+        query sorts last.  estimated_compute_ns is the DES service time,
+        filled from the OSD timing model (misses, codebook, tile count).
+        """
+        if query.deadline_ns is None:
+            return math.inf
+        return max(0, query.deadline_ns - now_ns - query.estimated_compute_ns)
+
     def peek(self, now_ns: int = 0) -> QueuedQuery | None:
         """Non-mutating preview of the ``pop`` selection."""
         if not self._pending:
@@ -200,6 +212,11 @@ class QueryQueue:
                 (qid for qid in self._insertion
                  if self._pending[qid].codebook == best_cb),
                 key=lambda qid: (self._pending[qid].arrival_ns, qid))
+        elif self.strategy is QueueStrategy.LSTF:
+            query_id = min(self._insertion, key=lambda qid: (
+                self._slack_ns(self._pending[qid], now_ns),
+                self._pending[qid].arrival_ns,
+                qid))
         elif self.strategy is QueueStrategy.EDF:
             query_id = min(self._insertion, key=lambda qid: (
                 self._pending[qid].deadline_ns
@@ -787,6 +804,16 @@ class SchedulingWindow:
             self._width / max(1, num_tenants)) * w.fairness_factor
         # Score each query, optionally applying the tenant penalty.
         scored: list[tuple[float, QueuedQuery]] = []
+        if self.strategy is QueueStrategy.LSTF or os.environ.get(
+                "OSD_POLICY", "window") == "lstf":
+            # LSTF: least slack first.  slack = deadline - now - service.
+            # All three terms are nanoseconds, so no per-workload weights.
+            for q in self._window:
+                scored.append((1.0 / max(1.0, float(
+                    self._slack_ns(q, view.now_ns))), q))
+            scored.sort(key=lambda pair: (
+                -pair[0], pair[1].arrival_ns, pair[1].query_id))
+            return scored
         for q in self._window:
             s = self._score_one(q, view)
             if per_tenant[q.tenant] > fair_quota:
