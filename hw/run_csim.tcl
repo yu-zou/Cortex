@@ -1,0 +1,4 @@
+open_project acc_top_proj
+open_solution solution1
+csim_design
+exit

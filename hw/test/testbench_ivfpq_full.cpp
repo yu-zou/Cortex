@@ -6,7 +6,7 @@
 #include <vector>
 
 // ─── Override synthesis parameters for small test ───
-// Must come before #include "acc_top.h" to override defaults (M_SYN=16, DIM_SYN=128)
+// Must come before #include "acc_top.h" to override defaults (M_SYN=96, DIM_SYN=768)
 #define M_SYN   4
 #define DIM_SYN 32
 #define DS_SYN  (DIM_SYN / M_SYN)
