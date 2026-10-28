@@ -17,6 +17,9 @@ extern "C" {
 #define CORTEX_METRIC_L2 0
 #define CORTEX_METRIC_IP 1
 
+/* Search modes */
+#define CORTEX_MODE_IVFPQ 0   /* IVF + Product Quantization ADC search */
+
 /* Version check — FIRST function called by loader */
 uint32_t cortex_api_version(void);
 
@@ -24,10 +27,14 @@ uint32_t cortex_api_version(void);
 int cortex_driver_init(const char* config_json);
 void cortex_driver_shutdown(void);
 
-/* Top-K result entry */
+/* Top-K result entry — matches FPGA 128-bit output format:
+ *   dist(FP32, 32b) + doc_addr(64b) + doc_length(32b)
+ * Stage 5 result push */
 struct cortex_topk_entry {
-    uint64_t vector_id;
     float distance;
+    uint64_t doc_addr;     /* document start address in object storage */
+    uint32_t doc_length;   /* document byte length */
+    uint32_t _pad;         /* padding to 128-bit */
 };
 
 /* Semantic read result — fixed-size, no pointers across ABI */
@@ -40,14 +47,15 @@ struct cortex_read_result {
 /* Core operations — all thread-safe, driver handles synchronization */
 
 /**
- * cortex_semantic_read — Run IVFPQ ADC search on a cluster object
- * @cluster_id:   IVF cluster identifier (chosen by RGW via centroid distance)
- * @object_data:  Raw bytes of the Ceph object (ClusterHeader + codebook + PQ codes)
+ * cortex_semantic_read — Run vector search on a cluster/graph object
+ * @cluster_id:   Cluster/graph identifier
+ * @object_data:  Raw bytes (IVF cluster or HNSW graph data)
  * @object_size:  Size of object_data in bytes
  * @query_vec:    Query vector (query_dim floats)
  * @query_dim:    Dimensionality of query vector
  * @top_k:        Number of results to return (max CORTEX_TOPK_MAX)
  * @metric_type:  CORTEX_METRIC_L2 or CORTEX_METRIC_IP
+ * @search_mode:  CORTEX_MODE_IVFPQ or CORTEX_MODE_HNSW
  */
 struct cortex_read_result cortex_semantic_read(
     uint32_t cluster_id,
@@ -56,7 +64,8 @@ struct cortex_read_result cortex_semantic_read(
     const float* query_vec,
     uint32_t query_dim,
     uint32_t top_k,
-    uint32_t metric_type
+    uint32_t metric_type,
+    uint32_t search_mode
 );
 
 /**
@@ -80,6 +89,8 @@ int cortex_semantic_write(
 /* Cache state queries */
 int cortex_is_cluster_cached(uint32_t cluster_id);
 uint32_t cortex_get_last_cluster_id(void);
+
+
 
 #ifdef __cplusplus
 }

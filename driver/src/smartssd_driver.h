@@ -20,7 +20,7 @@ public:
     cortex_read_result semantic_read(
         uint32_t cluster_id, const void* object_data, uint64_t object_size,
         const float* query_vec, uint32_t query_dim, uint32_t top_k,
-        uint32_t metric_type);
+        uint32_t metric_type, uint32_t search_mode);
 
     int semantic_write(
         uint32_t cluster_id, const void* codebook, uint64_t codebook_size,
@@ -31,12 +31,6 @@ public:
     uint32_t get_last_cluster_id() const;
 
 private:
-    struct CacheSlot {
-        uint32_t cluster_id;
-        uint64_t last_access;
-        bool reload_codebook = false;
-    };
-
     // LRU eviction — must be called with mutex held
     void evict_lru_locked();
 

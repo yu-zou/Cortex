@@ -46,8 +46,8 @@ docker build --network=host $NO_CACHE \
     -t "$TEST_IMAGE" \
     "$PROJECT_ROOT"
 
-# --- Run test ---
-echo "Running integration test..."
+# --- Run test (includes Ceph cluster bootstrap + FPGA verification + tests) ---
+echo "Running integration test (Ceph cluster + FPGA verification + tests)..."
 START_TIME=$(date +%s)
 
 if [ -n "$KEEP" ]; then
