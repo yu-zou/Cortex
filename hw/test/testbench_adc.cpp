@@ -29,7 +29,7 @@ void systolic_topk_insert(float cand_dist, ap_uint<64> cand_addr,
 using namespace std;
 
 // ─── Test configuration (small M=2 for clarity) ───
-// Array dimensions from acc_top.h: M_SYN=16, KS=256, DS_SYN=8
+// Array dimensions from acc_top.h: M_SYN=96, KS=256, DS_SYN=8
 // We only populate the first TEST_M sub-quantizers.
 static const int TEST_M   = 2;          // Active sub-quantizers
 static const int TEST_DIM = TEST_M * DS_SYN;  // = 16
