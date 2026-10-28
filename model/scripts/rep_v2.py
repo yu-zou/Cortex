@@ -54,7 +54,7 @@ idx = {t: i for i, t in enumerate(tenant_names)}
 events = []
 with open("data/derived/trace/events.jsonl") as f:
     for i, line in enumerate(f):
-        if i >= 500:
+        if i >= int(os.environ.get("V2_EVENTS", "500")):
             break
         events.append(json.loads(line))
 t0 = events[0]["time_ns"]
@@ -196,6 +196,7 @@ RGW_W = RGWScoreWeights(cache=float(os.environ.get("RGW_CACHE", "3.0")),
                         queue_depth_cap=int(os.environ.get("RGW_CAP", "32")))
 CFG = [
     ("fifo", "fifo", None),
+    ("lstf", "lstf", None),
     ("cb4", "multifactor",
      ScoreWeights(aging=4.0, codebook=1.0, ddr=3.0, slow_first=0, deadline=0.5, cost=0.25)),
     ("cbf", "multifactor",
