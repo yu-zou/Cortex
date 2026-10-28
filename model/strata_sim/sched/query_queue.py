@@ -804,8 +804,8 @@ class SchedulingWindow:
             self._width / max(1, num_tenants)) * w.fairness_factor
         # Score each query, optionally applying the tenant penalty.
         scored: list[tuple[float, QueuedQuery]] = []
-        if self.strategy is QueueStrategy.LSTF or os.environ.get(
-                "OSD_POLICY", "window") == "lstf":
+        if (getattr(self, "strategy", None) is QueueStrategy.LSTF
+                or os.environ.get("OSD_POLICY", "window") == "lstf"):
             # LSTF: least slack first.  slack = deadline - now - service.
             # All three terms are nanoseconds, so no per-workload weights.
             for q in self._window:
