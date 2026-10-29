@@ -169,6 +169,10 @@ class QueryQueue:
             return math.inf
         return max(0, query.deadline_ns - now_ns - query.estimated_compute_ns)
 
+    def _deadline_key(self, query: QueuedQuery) -> int:
+        """EDF tie-break key.  None (no SLO) sorts last."""
+        return query.deadline_ns if query.deadline_ns is not None else math.inf
+
     def peek(self, now_ns: int = 0) -> QueuedQuery | None:
         """Non-mutating preview of the ``pop`` selection."""
         if not self._pending:
@@ -213,12 +217,13 @@ class QueryQueue:
                  if self._pending[qid].codebook == best_cb),
                 key=lambda qid: (self._pending[qid].arrival_ns, qid))
         elif self.strategy is QueueStrategy.LSTF:
-            # Least slack first; tie-break by longest waiting, then id.
-            # The aging term matters at saturation: without it a wide-deadline
-            # query can be postponed forever behind tight ones.
+            # Least slack first.  Tie-break by earliest deadline (EDF), then
+            # id.  A query whose slack is already 0 is unrecoverable, so the
+            # tie-break must not reward it for having waited long; EDF
+            # instead prefers the one still salvageable.
             query_id = min(self._insertion, key=lambda qid: (
                 self._slack_ns(self._pending[qid], now_ns),
-                -(now_ns - self._pending[qid].arrival_ns),
+                self._deadline_key(self._pending[qid]),
                 qid))
         elif self.strategy is QueueStrategy.EDF:
             query_id = min(self._insertion, key=lambda qid: (
@@ -809,13 +814,13 @@ class SchedulingWindow:
         scored: list[tuple[float, QueuedQuery]] = []
         if (getattr(self, "strategy", None) is QueueStrategy.LSTF
                 or os.environ.get("OSD_POLICY", "window") == "lstf"):
-            # LSTF: least slack first, tie-break by longest waiting, then id.
+            # LSTF: least slack first, tie-break by earliest deadline, then id.
             # No normalised factors, so nothing is coupled to the workload.
             for q in self._window:
                 scored.append((self._slack_ns(q, view.now_ns), q))
             scored.sort(key=lambda pair: (
                 pair[0],
-                -(view.now_ns - pair[1].arrival_ns),
+                self._deadline_key(pair[1]),
                 pair[1].query_id))
             return scored
         for q in self._window:
