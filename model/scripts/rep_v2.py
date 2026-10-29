@@ -45,11 +45,26 @@ DIRECT_CYC = 6.0
 SPEC_PATH = os.environ.get("V2_SPEC", "data/derived/workload_v2/spec_window.npz")
 spec = np.load(SPEC_PATH, allow_pickle=True)
 tenant_names = [str(x) for x in spec["tenant_names"]]
-offsets = spec["offsets"]
-priv = spec["private_sizes"]
-pub = spec["pub_sizes"]
-PUB_OFF, PRIV_OFF = 0, len(pub)
+user_ids = spec["user_ids"]          # tenant -> user index
+S_per_user = spec["S"]               # user -> docs
+nlist_per_user = spec["nlist"]       # user -> nlist
+offsets = spec["offsets"]            # user -> cluster offset
+all_cluster_sizes = spec["all_cluster_sizes"]  # flat cluster sizes
 idx = {t: i for i, t in enumerate(tenant_names)}
+# tenant -> user -> cluster range (lo, hi)
+tenant_to_user = {}
+for t, ui in zip(tenant_names, user_ids):
+    tenant_to_user[t] = int(ui)
+# Build csizes from all_cluster_sizes
+csizes = {}
+for cid in range(len(all_cluster_sizes)):
+    csizes[cid] = int(all_cluster_sizes[cid])
+# Build tenant -> cluster range
+def tenant_cluster_range(tenant_name):
+    ui = tenant_to_user[tenant_name]
+    lo = int(offsets[ui])
+    hi = int(offsets[ui + 1])
+    return lo, hi
 
 events = []
 with open("data/derived/trace/events.jsonl") as f:
@@ -134,38 +149,39 @@ for r in range(K):
     base_t = r * span
     for e in events:
         t = e["tenant"]
-        i = idx[t]
-        lo, hi = int(offsets[i]), int(offsets[i + 1])
+        if t not in idx:
+            continue
+        lo, hi = tenant_cluster_range(t)
         if TENANCY == "cloud":
             if _CLS is not None and int(_CLS[i]) == 1:
                 # large tenant: shared public index, shared codebook
                 k2 = min(NPROBE32, len(pub))
-                ids = [PUB_OFF + int(p) for p in rng.choice(len(pub), size=k2, replace=False)]
+                ids = [int(p) for p in rng.choice(len(pub), size=k2, replace=False)]
                 cb_id = "cb-pub"
             else:
                 # small tenant: own small index, own codebook
                 k1 = min(NPROBE32, hi - lo)
-                ids = [PRIV_OFF + int(p) for p in (lo + rng.choice(hi - lo, size=k1, replace=False))]
+                ids = [int(p) for p in (lo + rng.choice(hi - lo, size=k1, replace=False))]
                 cb_id = "cb-priv-" + t
         elif TENANCY == "d3" and i not in _priv_tenants:
             # shared tenant: probe ONLY the public corpus
             k2 = min(NPROBE32, len(pub))
-            ids = [PUB_OFF + int(p) for p in rng.choice(len(pub), size=k2, replace=False)]
+            ids = [int(p) for p in rng.choice(len(pub), size=k2, replace=False)]
             cb_id = "cb-pub"
         elif TENANCY == "d3":
             # private tenant: probe ONLY its own corpus
             k1 = min(NPROBE32, hi - lo)
-            ids = [PRIV_OFF + int(p) for p in (lo + rng.choice(hi - lo, size=k1, replace=False))]
+            ids = [int(p) for p in (lo + rng.choice(hi - lo, size=k1, replace=False))]
             cb_id = "cb-priv-" + t
         else:
             k1 = min(NP, hi - lo)
-            ids = [PRIV_OFF + int(p) for p in (lo + rng.choice(hi - lo, size=k1, replace=False))]
+            ids = [int(p) for p in (lo + rng.choice(hi - lo, size=k1, replace=False))]
             k2 = min(NQ, len(pub))
-            ids += [PUB_OFF + int(p) for p in rng.choice(len(pub), size=k2, replace=False)]
+            ids += [int(p) for p in rng.choice(len(pub), size=k2, replace=False)]
             cb_id = "cb-priv-" + t
         for cid in ids:
             if cid not in csizes:
-                csizes[cid] = int(pub[cid]) if cid < PRIV_OFF else int(priv[cid - PRIV_OFF])
+                csizes[cid] = int(all_cluster_sizes[cid]) 
         z = zlib.crc32(t.encode()) % 100
         slo = 5_000_000 if z < 50 else (7_000_000 if z < 80 else 11_000_000)
         a = int(round((base_t + e["time_ns"] - t0) / SCALE))
@@ -188,7 +204,7 @@ print("TAG=%s tenancy=%s probes=%d queries=%d distinct_clusters=%d span=%.2fs ra
       % (TAG, TENANCY, (NPROBE32 if TENANCY == "d3" else NP + NQ),
          len(queries), len(allc), queries[-1].arrival_ns / 1e9, rate))
 
-VPC = int(np.median(priv))
+VPC = int(np.median(all_cluster_sizes))
 RGW_W = RGWScoreWeights(cache=float(os.environ.get("RGW_CACHE", "3.0")),
                         load=float(os.environ.get("RGW_LOAD", "1.5")),
                         fpga=float(os.environ.get("RGW_FPGA", "1.0")),
