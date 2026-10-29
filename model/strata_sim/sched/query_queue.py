@@ -213,9 +213,12 @@ class QueryQueue:
                  if self._pending[qid].codebook == best_cb),
                 key=lambda qid: (self._pending[qid].arrival_ns, qid))
         elif self.strategy is QueueStrategy.LSTF:
+            # Least slack first; tie-break by longest waiting, then id.
+            # The aging term matters at saturation: without it a wide-deadline
+            # query can be postponed forever behind tight ones.
             query_id = min(self._insertion, key=lambda qid: (
                 self._slack_ns(self._pending[qid], now_ns),
-                self._pending[qid].arrival_ns,
+                -(now_ns - self._pending[qid].arrival_ns),
                 qid))
         elif self.strategy is QueueStrategy.EDF:
             query_id = min(self._insertion, key=lambda qid: (
@@ -806,13 +809,14 @@ class SchedulingWindow:
         scored: list[tuple[float, QueuedQuery]] = []
         if (getattr(self, "strategy", None) is QueueStrategy.LSTF
                 or os.environ.get("OSD_POLICY", "window") == "lstf"):
-            # LSTF: least slack first.  slack = deadline - now - service.
-            # All three terms are nanoseconds, so no per-workload weights.
+            # LSTF: least slack first, tie-break by longest waiting, then id.
+            # No normalised factors, so nothing is coupled to the workload.
             for q in self._window:
-                scored.append((1.0 / max(1.0, float(
-                    self._slack_ns(q, view.now_ns))), q))
+                scored.append((self._slack_ns(q, view.now_ns), q))
             scored.sort(key=lambda pair: (
-                -pair[0], pair[1].arrival_ns, pair[1].query_id))
+                pair[0],
+                -(view.now_ns - pair[1].arrival_ns),
+                pair[1].query_id))
             return scored
         for q in self._window:
             s = self._score_one(q, view)
