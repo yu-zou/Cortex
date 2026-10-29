@@ -94,6 +94,13 @@ class QueryQueue:
     strategy: QueueStrategy | str = QueueStrategy.FIFO
     base_service_ns: int = 1_000
     miss_penalty_ns: int = 10_000
+    # LSTF miss penalties: cost of a codebook that is not in BRAM and of a
+    # cluster that is not in the DDR cache.  The DES timing model measured
+    # 143 us (codebook load) and 239 us (SSD load of a 10960-doc cluster) on
+    # the 875-user spec; without these LSTF cannot tell a cached sub-query
+    # from a cold one and degenerates into deadline ordering.
+    codebook_miss_ns: int = 143_000
+    ddr_miss_ns: int = 239_000
     weights: Mapping[str, int] | None = None
     quantum: int = 1
 
@@ -158,16 +165,48 @@ class QueryQueue:
         miss = int(round((1.0 - float(query.ddr_hit_probability)) * self.miss_penalty_ns))
         return now_ns + queue_delay + query.estimated_compute_ns + miss
 
-    def _slack_ns(self, query: QueuedQuery, now_ns: int = 0) -> int:
+    def _service_ns(self, query: QueuedQuery,
+                    bram_codebooks: frozenset[str] | None = None,
+                    ddr_cached_clusters: frozenset[int] | None = None) -> int:
+        """Service time estimate with cache miss penalties.
+
+        estimated_compute_ns is the FPGA scan time assuming the codebook is
+        resident; without a view the caller cannot correct for that, so the
+        base estimate is returned unchanged.
+        """
+        s = query.estimated_compute_ns
+        if bram_codebooks is not None and query.codebook_id is not None \
+                and query.codebook_id not in bram_codebooks:
+            s += self.codebook_miss_ns
+        if ddr_cached_clusters is not None:
+            if not any(c in ddr_cached_clusters for c in query.cluster_ids):
+                s += self.ddr_miss_ns
+        return s
+
+    def _slack_ns(self, query: QueuedQuery, now_ns: int = 0,
+                  bram_codebooks: frozenset[str] | None = None,
+                  ddr_cached_clusters: frozenset[int] | None = None) -> int:
         """Slack in nanoseconds: how long this query can still wait.
 
         deadline_ns is None (no SLO) => treated as infinite slack, so the
         query sorts last.  estimated_compute_ns is the DES service time,
         filled from the OSD timing model (misses, codebook, tile count).
+
+        When bram_codebooks / ddr_cached_clusters are supplied, miss penalties
+        are added: a codebook not resident in BRAM costs 143 us, a cluster not
+        in the DDR cache costs 239 us of SSD load.  Without these the scheduler
+        cannot distinguish a cached sub-query from a cold one.
         """
         if query.deadline_ns is None:
             return math.inf
-        return max(0, query.deadline_ns - now_ns - query.estimated_compute_ns)
+        service = query.estimated_compute_ns
+        if bram_codebooks is not None and query.codebook_id is not None \
+                and query.codebook_id not in bram_codebooks:
+            service += self.codebook_miss_ns
+        if ddr_cached_clusters is not None:
+            if not any(c in ddr_cached_clusters for c in query.cluster_ids):
+                service += self.ddr_miss_ns
+        return max(0, query.deadline_ns - now_ns - service)
 
     def _deadline_key(self, query: QueuedQuery) -> int:
         """EDF tie-break key.  None (no SLO) sorts last."""
@@ -188,15 +227,21 @@ class QueryQueue:
             clone.push(self._pending[query_id])
         return clone.pop(now_ns)
 
-    def pop(self, now_ns: int = 0) -> QueuedQuery:
+    def pop(self, now_ns: int = 0, view: "OsdView | None" = None) -> QueuedQuery:
         if not self._pending:
             raise IndexError("no queued queries")
         if self.strategy is QueueStrategy.FIFO:
             query_id = min(self._insertion,
                            key=lambda qid: (self._pending[qid].arrival_ns, qid))
         elif self.strategy is QueueStrategy.SPT:
+            # Shortest processing time: cache-aware.  With a view, the miss
+            # penalties are added to the service estimate so a sub-query whose
+            # codebook or cluster is already resident sorts first.
+            bram = getattr(view, "bram_codebooks", None) if view else None
+            ddr = getattr(view, "ddr_cached_clusters", None) if view else None
             query_id = min(self._insertion, key=lambda qid: (
-                self.estimated_finish_ns(self._pending[qid], now_ns), qid))
+                self._service_ns(self._pending[qid], bram, ddr),
+                qid))
         elif self.strategy is QueueStrategy.BATCH:
             # Codebook-grouped FIFO: process all queries sharing the same
             # codebook consecutively (one codebook load per group), with
@@ -221,8 +266,16 @@ class QueryQueue:
             # id.  A query whose slack is already 0 is unrecoverable, so the
             # tie-break must not reward it for having waited long; EDF
             # instead prefers the one still salvageable.
+            #
+            # When a view is available, miss penalties are added to the
+            # service estimate: a sub-query whose codebook is not in BRAM
+            # costs 143 us more, one whose cluster is not in DDR costs 239 us
+            # more.  Sorting by that penalised slack is what makes LSTF
+            # cache-aware instead of a plain deadline sort.
+            bram = getattr(view, "bram_codebooks", None) if view else None
+            ddr = getattr(view, "ddr_cached_clusters", None) if view else None
             query_id = min(self._insertion, key=lambda qid: (
-                self._slack_ns(self._pending[qid], now_ns),
+                self._slack_ns(self._pending[qid], now_ns, bram, ddr),
                 self._deadline_key(self._pending[qid]),
                 qid))
         elif self.strategy is QueueStrategy.EDF:

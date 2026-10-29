@@ -556,7 +556,7 @@ class OsdScheduler:
         assert self._queue is not None
         if self._queue.pending == 0:
             return None
-        return self._queue.pop(view.now_ns)
+        return self._queue.pop(view.now_ns, view)
 
     def window_queries(self) -> list[QueuedQuery]:
         """Pending window snapshot (delegates to SchedulingWindow)."""
