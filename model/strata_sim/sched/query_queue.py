@@ -34,6 +34,7 @@ class QueueStrategy(str, Enum):
     BATCH = "batch"
     CGB = "cgb"  # Cluster-Group Batching
     LSTF = "lstf"  # Least-Slack-Time-First (physical units, no weights)
+    CACHE = "cache"  # Cache-aware SPT: prioritize cached codebook/cluster
 
 
 def _nonempty(name: str, value: str) -> None:
@@ -261,6 +262,14 @@ class QueryQueue:
                 (qid for qid in self._insertion
                  if self._pending[qid].codebook == best_cb),
                 key=lambda qid: (self._pending[qid].arrival_ns, qid))
+        elif self.strategy is QueueStrategy.CACHE:
+            # Cache-aware SPT: prioritize queries whose codebook/cluster is
+            # already resident.  Uses the same miss penalties as LSTF.
+            bram = getattr(view, "bram_codebooks", None) if view else None
+            ddr = getattr(view, "ddr_cached_clusters", None) if view else None
+            query_id = min(self._insertion, key=lambda qid: (
+                self._service_ns(self._pending[qid], bram, ddr),
+                qid))
         elif self.strategy is QueueStrategy.LSTF:
             # Least slack first.  Tie-break by earliest deadline (EDF), then
             # id.  A query whose slack is already 0 is unrecoverable, so the
