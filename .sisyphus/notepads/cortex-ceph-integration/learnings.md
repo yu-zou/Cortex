@@ -1,2 +1,0 @@
-- vstart.sh inside the Ceph container needs to run from /ceph/build.u2204 with the repo-mounted /ceph tree available.
-- build-with-container quoting is brittle; a wrapper script avoids losing the bash -c payload.
