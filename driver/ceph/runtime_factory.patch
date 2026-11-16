@@ -1,0 +1,20 @@
+--- a/src/cortex/osd/semantic_runtime_factory.h
++++ b/src/cortex/osd/semantic_runtime_factory.h
+@@ -1,4 +1,5 @@
+ #pragma once
+ #include "semantic_cpu_backend.h"
++#include "semantic_fpga_backend.h"
+ #include "semantic_queue_policy.h"
+ #include "semantic_runtime_stages.h"
+@@ -26,7 +27,10 @@
+     if(r)return r;
+     point(SemanticStartupStage::lease);
+     auto pending=std::make_unique<Runtime>();
+-    pending->backend=std::make_unique<SemanticCpuBackend>(std::move(lease));
++    if(!lease.startup_config().compare(0,18,"{\"backend\":\"fpga\","))
++      pending->backend=std::make_unique<SemanticFpgaBackend>(std::move(lease));
++    else
++      pending->backend=std::make_unique<SemanticCpuBackend>(std::move(lease));
+     if(!pending->backend->finite_return_contract())return -EOPNOTSUPP;
+     point(SemanticStartupStage::backend);
+     pending->transport=make_transport();
