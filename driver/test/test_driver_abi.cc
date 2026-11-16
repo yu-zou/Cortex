@@ -25,7 +25,7 @@ static std::string valid_init_json() {
 
 TEST(DriverABITest, ApiVersion) {
     EXPECT_EQ(cortex_api_version(), static_cast<uint32_t>(CORTEX_API_VERSION));
-    EXPECT_EQ(cortex_api_version(), 1u);
+    EXPECT_EQ(cortex_api_version(), 2u);
 }
 
 TEST(DriverABITest, InitNullConfig) {

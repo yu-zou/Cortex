@@ -263,8 +263,27 @@ class Resource:
         self._end_keys = [r.end_ns for r in self._by_end]
 
     def _insert(self, reservation: Reservation) -> None:
-        insort(self._reservations, reservation, key=lambda r: (r.start_ns, r.end_ns))
-        insort(self._by_end, reservation, key=lambda r: (r.end_ns, r.start_ns))
+        start_key = (reservation.start_ns, reservation.end_ns)
+        lo, hi = 0, len(self._reservations)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            current = self._reservations[mid]
+            if (current.start_ns, current.end_ns) <= start_key:
+                lo = mid + 1
+            else:
+                hi = mid
+        self._reservations.insert(lo, reservation)
+
+        end_key = (reservation.end_ns, reservation.start_ns)
+        lo, hi = 0, len(self._by_end)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            current = self._by_end[mid]
+            if (current.end_ns, current.start_ns) <= end_key:
+                lo = mid + 1
+            else:
+                hi = mid
+        self._by_end.insert(lo, reservation)
         insort(self._end_keys, reservation.end_ns)
 
     def to_dict(self) -> dict:

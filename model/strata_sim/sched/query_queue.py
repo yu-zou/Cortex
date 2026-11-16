@@ -35,6 +35,9 @@ class QueueStrategy(str, Enum):
     CGB = "cgb"  # Cluster-Group Batching
     LSTF = "lstf"  # Least-Slack-Time-First (physical units, no weights)
     CACHE = "cache"  # Cache-aware SPT: prioritize cached codebook/cluster
+    BWC = "bwc"  # Bounded-wait cache benefit, not shortest-job ordering
+    CBW = "cbw"  # Bounded-wait cache benefit per unit of estimated service
+    CBW = "cbw"  # Bounded cache benefit per unit of estimated service
 
 
 def _nonempty(name: str, value: str) -> None:
@@ -100,10 +103,11 @@ class QueryQueue:
     # 143 us (codebook load) and 239 us (SSD load of a 10960-doc cluster) on
     # the 875-user spec; without these LSTF cannot tell a cached sub-query
     # from a cold one and degenerates into deadline ordering.
-    codebook_miss_ns: int = 143_000
-    ddr_miss_ns: int = 239_000
+    codebook_miss_ns: int = 0
+    ddr_miss_ns: int = 0
     weights: Mapping[str, int] | None = None
     quantum: int = 1
+    max_wait_ns: int = 5_000_000
 
     _pending: dict[str, QueuedQuery] = field(init=False, default_factory=dict)
     _insertion: list[str] = field(init=False, default_factory=list)
@@ -126,6 +130,7 @@ class QueryQueue:
             raise ContractError(f"strategy must be a QueueStrategy, got {self.strategy!r}")
         if self.base_service_ns < 0 or self.miss_penalty_ns < 0:
             raise ContractError("service and miss penalty estimates must be non-negative")
+        _nonneg("max_wait_ns", self.max_wait_ns)
         if not isinstance(self.quantum, int) or self.quantum < 1:
             raise ContractError(f"quantum must be a positive int, got {self.quantum!r}")
 
@@ -213,7 +218,7 @@ class QueryQueue:
         """EDF tie-break key.  None (no SLO) sorts last."""
         return query.deadline_ns if query.deadline_ns is not None else math.inf
 
-    def peek(self, now_ns: int = 0) -> QueuedQuery | None:
+    def peek(self, now_ns: int = 0, view: "OsdView | None" = None) -> QueuedQuery | None:
         """Non-mutating preview of the ``pop`` selection."""
         if not self._pending:
             return None
@@ -223,14 +228,81 @@ class QueryQueue:
             miss_penalty_ns=self.miss_penalty_ns,
             weights=self.weights,
             quantum=self.quantum,
+            codebook_miss_ns=self.codebook_miss_ns,
+            ddr_miss_ns=self.ddr_miss_ns,
+            max_wait_ns=self.max_wait_ns,
         )
         for query_id in self._insertion:
             clone.push(self._pending[query_id])
-        return clone.pop(now_ns)
+        return clone.pop(now_ns, view)
 
     def pop(self, now_ns: int = 0, view: "OsdView | None" = None) -> QueuedQuery:
         if not self._pending:
             raise IndexError("no queued queries")
+        def service(qid):
+            q = self._pending[qid]
+            if view is not None and view.service_estimates_ns is not None:
+                return view.service_estimates_ns[qid]
+            return self._service_ns(q,
+                view.bram_codebooks if view else None,
+                view.ddr_cached_clusters if view else None)
+
+        if self.strategy is QueueStrategy.BWC:
+            overdue = [qid for qid in self._insertion
+                       if now_ns - self._pending[qid].arrival_ns >= self.max_wait_ns]
+            if overdue:
+                winner = min(overdue, key=lambda qid: (
+                    self._pending[qid].arrival_ns, qid))
+            else:
+                if view is None or view.cache_savings_ns is None:
+                    raise ContractError("bwc requires live cache_savings_ns")
+                winner = min(self._insertion, key=lambda qid: (
+                    -view.cache_savings_ns[qid], self._pending[qid].arrival_ns, qid))
+            return self.remove(winner)
+
+        if self.strategy is QueueStrategy.CBW:
+            overdue = [qid for qid in self._insertion
+                       if now_ns - self._pending[qid].arrival_ns >= self.max_wait_ns]
+            if overdue:
+                winner = min(overdue, key=lambda qid: (
+                    self._pending[qid].arrival_ns, qid))
+            else:
+                if (view is None or view.cache_savings_ns is None
+                        or view.service_estimates_ns is None):
+                    raise ContractError(
+                        "cbw requires live cache_savings_ns and service_estimates_ns")
+                winner = min(self._insertion, key=lambda qid: (
+                    -view.cache_savings_ns[qid]
+                    / max(view.service_estimates_ns[qid], 1),
+                    self._pending[qid].arrival_ns,
+                    qid,
+                ))
+            return self.remove(winner)
+
+        if self.strategy is QueueStrategy.CBW:
+            overdue = [qid for qid in self._insertion
+                       if now_ns - self._pending[qid].arrival_ns >= self.max_wait_ns]
+            if overdue:
+                winner = min(overdue, key=lambda qid: (
+                    self._pending[qid].arrival_ns, qid))
+            else:
+                if (view is None or view.cache_savings_ns is None
+                        or view.service_estimates_ns is None):
+                    raise ContractError(
+                        "cbw requires live cache_savings_ns and service_estimates_ns")
+                winner = min(self._insertion, key=lambda qid: (
+                    -view.cache_savings_ns[qid] / max(view.service_estimates_ns[qid], 1),
+                    self._pending[qid].arrival_ns, qid))
+            return self.remove(winner)
+
+        if self.strategy in (QueueStrategy.SPT, QueueStrategy.CACHE):
+            return self.remove(min(self._insertion, key=lambda qid: (
+                service(qid), self._pending[qid].arrival_ns, qid)))
+        if self.strategy is QueueStrategy.LSTF:
+            return self.remove(min(self._insertion, key=lambda qid: (
+                (self._pending[qid].deadline_ns - now_ns - service(qid)
+                 if self._pending[qid].deadline_ns is not None else math.inf),
+                self._pending[qid].arrival_ns, qid)))
         if self.strategy is QueueStrategy.FIFO:
             query_id = min(self._insertion,
                            key=lambda qid: (self._pending[qid].arrival_ns, qid))
@@ -298,7 +370,7 @@ class QueryQueue:
             query_id = self._select_drr()
         return self.remove(query_id)
 
-    def order(self, now_ns: int = 0) -> tuple[str, ...]:
+    def order(self, now_ns: int = 0, view: "OsdView | None" = None) -> tuple[str, ...]:
         """Non-mutating deterministic preview of the pop order."""
         clone = QueryQueue(
             strategy=self.strategy,
@@ -306,12 +378,15 @@ class QueryQueue:
             miss_penalty_ns=self.miss_penalty_ns,
             weights=self.weights,
             quantum=self.quantum,
+            codebook_miss_ns=self.codebook_miss_ns,
+            ddr_miss_ns=self.ddr_miss_ns,
+            max_wait_ns=self.max_wait_ns,
         )
         for query_id in self._insertion:
             clone.push(self._pending[query_id])
         served: list[str] = []
         while clone.pending:
-            served.append(clone.pop(now_ns).query_id)
+            served.append(clone.pop(now_ns, view).query_id)
         return tuple(served)
 
     def _weight_for(self, tenant: str) -> int:
@@ -511,6 +586,8 @@ class OsdView:
     bram_codebooks: frozenset[str] = frozenset()
     ddr_cached_clusters: frozenset[int] = frozenset()
     max_compute_ns: int = 1
+    service_estimates_ns: Mapping[str, int] | None = None
+    cache_savings_ns: Mapping[str, int] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.now_ns, int) or self.now_ns < 0:
@@ -879,10 +956,15 @@ class SchedulingWindow:
             # LSTF: least slack first, tie-break by earliest deadline, then id.
             # No normalised factors, so nothing is coupled to the workload.
             for q in self._window:
-                scored.append((self._slack_ns(q, view.now_ns), q))
+                estimate = (view.service_estimates_ns[q.query_id]
+                            if view.service_estimates_ns is not None
+                            else q.estimated_compute_ns)
+                slack = (q.deadline_ns - view.now_ns - estimate
+                         if q.deadline_ns is not None else math.inf)
+                scored.append((slack, q))
             scored.sort(key=lambda pair: (
                 pair[0],
-                self._deadline_key(pair[1]),
+                (pair[1].deadline_ns if pair[1].deadline_ns is not None else math.inf),
                 pair[1].query_id))
             return scored
         for q in self._window:

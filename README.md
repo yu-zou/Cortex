@@ -65,18 +65,18 @@ The system layer is a Ceph fork containing the following Cortex-specific enhance
 The interface between the storage system and the driver is defined by a fixed-size C ABI to ensure compatibility and eliminate heap allocation overhead across the boundary.
 
 ```c
-#define CORTEX_API_VERSION  1
+#define CORTEX_API_VERSION  2
 #define CORTEX_TOPK_MAX     500
 #define CORTEX_METRIC_L2    0
 #define CORTEX_METRIC_IP    1
 
-/* Top-K result entry — matches FPGA 128-bit output:
+/* Host ABI entry — 24 bytes on the supported 64-bit ABI (not FPGA-packed):
  *   dist(FP32,32b) + doc_addr(64b) + doc_length(32b) + pad(32b) */
 struct cortex_topk_entry {
     float distance;
     uint64_t doc_addr;     /* document start address in object storage */
     uint32_t doc_length;   /* document byte length */
-    uint32_t _pad;         /* padding to 128-bit */
+    uint32_t _pad;         /* reserved, zero */
 };
 
 struct cortex_read_result {

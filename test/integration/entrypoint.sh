@@ -94,8 +94,8 @@ lib = ctypes.CDLL("libcortex_driver.so")
 lib.cortex_api_version.restype = ctypes.c_uint32
 v = lib.cortex_api_version()
 print(f"ABI_VERSION={v}")
-if v != 1:
-    print("FAIL: expected version 1")
+if v != 2:
+    print("FAIL: expected version 2")
     sys.exit(1)
 print("PASS: ABI version matches")
 ' 2>&1) || true
@@ -115,7 +115,7 @@ import ctypes, sys, os, time
 lib = ctypes.CDLL('libcortex_driver.so')
 lib.cortex_api_version.restype = ctypes.c_uint32
 ver = lib.cortex_api_version()
-if ver != 1:
+if ver != 2:
     print(f'ABI_ERROR: version={ver}')
     sys.exit(1)
 
@@ -158,9 +158,12 @@ class ReadResult(ctypes.Structure):
                 ('entries', TopKEntry * 500)]
 
 lib.cortex_semantic_read.restype = ReadResult
+lib.cortex_semantic_read.argtypes = [ctypes.c_uint32, ctypes.c_void_p,
+    ctypes.c_uint64, ctypes.POINTER(ctypes.c_float), ctypes.c_uint32,
+    ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32]
 query = (ctypes.c_float * 32)(*([0.5] * 32))
 t0 = time.time()
-r = lib.cortex_semantic_read(0, blob, len(blob), query, 32, 5, 0)
+r = lib.cortex_semantic_read(0, blob, len(blob), query, 32, 5, 0, 0)
 t1 = time.time()
 elapsed_ms = (t1 - t0) * 1000.0
 
@@ -222,6 +225,8 @@ echo "=== Running ceph_test_cortex_integration (GTest) ==="
 GTEST_EXIT=${PIPESTATUS[0]}
 
 [ "$GTEST_EXIT" -eq 0 ] || { echo "FAIL: ceph_test_cortex_integration exit=$GTEST_EXIT"; exit 1; }
+
+[ "$FPGA_FAIL" -eq 0 ] || { echo "FAIL: ${FPGA_FAIL} FPGA verification checks failed"; exit 1; }
 
 echo "=== ALL TESTS PASSED ==="
 exit 0

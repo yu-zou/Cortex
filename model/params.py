@@ -1,4 +1,7 @@
-"""Single source of truth for every numeric constant the model uses.
+"""Hardware header generator and historical calibration reference.
+
+Runtime profiles are defined in strata_sim.model.strata_model; ModelParams
+below preserves historical calibration and is NOT the runtime ideal profile.
 
 Two groups live here and they must not be mixed:
 

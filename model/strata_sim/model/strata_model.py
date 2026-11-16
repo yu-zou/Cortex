@@ -14,6 +14,16 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 
+def pcie_gen3_gbps(lanes: int) -> float:
+    """One direction, encoding only; excludes TLP/DLLP overhead."""
+    return 8.0 * lanes * (128.0 / 130.0) / 8.0
+
+
+IDEAL_DDR_GBPS = 1600.0 * 64 / 8 / 1000  # shared DIMM data bus
+IDEAL_SSD_GBPS = 2 * pcie_gen3_gbps(4)  # assumes two simultaneous reads
+IDEAL_HOST_GBPS = pcie_gen3_gbps(16)
+
+
 @dataclass(frozen=True)
 class StrataModel:
     # ---- topology -----------------------------------------------------
@@ -34,9 +44,9 @@ class StrataModel:
     top_k: int = 8
 
     # ---- data-path parameters (fill per profile) ---------------------
-    B_ssd: float = 12.8           # SSD->PL DDR4, 2 striped Gen4x4, MIG-bound
-    B_ddr: float = 12.8           # PL DDR4 total (MIG)
-    B_xdma: float = 31.5          # host PCIe Gen4 x16
+    B_ssd: float = IDEAL_SSD_GBPS  # two independent Gen3 x4 links
+    B_ddr: float = IDEAL_DDR_GBPS  # two DIMMs share one data bus
+    B_xdma: float = IDEAL_HOST_GBPS  # Gen3 x16, encoding-only ceiling
     L_cmd: float = 10_000.0       # NVMe command latency (ns)
     L_pcie: float = 1_000.0       # PCIe round trip (ns)
     L_cpu: float = 50.0           # ns per rerank candidate (single core)
@@ -81,7 +91,8 @@ class StrataModel:
 def profile(kind: str) -> StrataModel:
     base = StrataModel()
     if kind == "ideal":
-        return replace(base, B_ssd=12.8, B_ddr=12.8, B_xdma=31.5,
+        return replace(base, B_ssd=IDEAL_SSD_GBPS, B_ddr=IDEAL_DDR_GBPS,
+                       B_xdma=IDEAL_HOST_GBPS,
                        L_cmd=10_000.0, L_pcie=1_000.0, L_cpu=50.0,
                        T_base=12_000.0)
     if kind == "estimated":
@@ -92,7 +103,7 @@ def profile(kind: str) -> StrataModel:
         # 0.735 GB/s IS a measurement of the SSD -> PL DDR4 path, but it was
         # taken with an unoptimized transfer design (single XDMA channel,
         # short bursts, an async CDC), so it is the *current implementation*,
-        # not the link ceiling (2x Gen4x4 = 15.76 GB/s, MIG-capped at 12.8).
+        # not the verified BD's encoding-only ceiling (2x Gen3 x4).
         # Do not silently treat it as the target: define an explicit profile
         # if a "current implementation" run is intended.
         raise ValueError(

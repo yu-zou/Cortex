@@ -31,11 +31,8 @@ from typing import Iterable, Mapping, Sequence
 
 from strata_sim.contracts.schema import TILE_MAX_DOCS, ContractError
 
-# Query read (QRY_READ 769) + distance-table build (DIST_TABLE_BUILD 1,613),
-# measured in csynth, overlapping to a fitted 2,211 cycles.  These do not
-# depend on the document batch, so a second tile of the SAME cluster can skip
-# them -- but the RTL as implemented rebuilds them on every call, so reuse is
-# opt-in (OSD_TABLE_REUSE=1) and off by default.
+# Historical fitted residual, NOT a verified decomposition of reusable work.
+# The opt-in reuse experiment below requires an explicit reusable cycle budget.
 TABLE_BUILD_CYCLES = 2211.0
 from strata_sim.des.engine import DesEngine
 from strata_sim.des.resources import Reservation, ResourceKind
@@ -50,7 +47,7 @@ from strata_sim.des.resources import Reservation, ResourceKind
 class OSDHardwareProfile:
     """Physical constants of one OSD's data path.
 
-    Bandwidths are bytes per nanosecond (GB/s ~= 8 * bytes_per_ns); the
+    Bandwidths are bytes per nanosecond (1 decimal GB/s = 1 byte/ns); the
     transfer durations are ``ceil(bytes / bytes_per_ns)``.
     """
 
@@ -63,6 +60,9 @@ class OSDHardwareProfile:
     pq_code_bytes: int = 96          # per vector
     raw_vector_bytes: int = 3072     # per vector
     codebook_bytes: int = 786432
+    accelerator_clock_mhz: float = 180.0  # design target; BD baseline is 120
+    codebook_beat_bytes: int = 64  # current acc_top has one 512-bit ingress
+    codebook_extra_cycles: int = 0  # lower-bound assumption, not calibrated
     vectors_per_cluster: int = 64
     # --- board-calibrated overrides (S25/S27 on-board measurements) ---
     # 实测：SSD->PL DDR4 直读 735 MB/s；acc_top 读 PL DDR4 ~5.5 GB/s；
@@ -112,7 +112,11 @@ class OSDHardwareProfile:
             board_calibrated=True,
             board_ddr_read_bytes_per_ns=float(m.B_ddr),
             ssd_to_ddr_bytes_per_ns=float(m.B_ssd),
-            board_codebook_load_ns=143_000,
+            board_codebook_load_ns=math.ceil(max(
+                cls.codebook_bytes / m.B_ddr,
+                math.ceil(cls.codebook_bytes / cls.codebook_beat_bytes)
+                * 1000 / m.f_clk_mhz)),
+            accelerator_clock_mhz=m.f_clk_mhz,
             board_pq_entry_bytes=int(m.S_entry),
             ddr_bytes_per_ns=float(m.B_ddr),
             ssd_command_ns=int(m.L_cmd),
@@ -120,7 +124,42 @@ class OSDHardwareProfile:
             pcie_bytes_per_ns=float(m.B_xdma),
         )
 
+    def codebook_duration_ns(self) -> int:
+        """No-stall lower bound: external supply vs one beat/accelerator cycle.
+
+        Zero extra cycles is explicit idealisation; not a complete RTL latency
+        measurement. Does not assume two DIMMs imply two independent channels.
+        """
+        beats = math.ceil(self.codebook_bytes / self.codebook_beat_bytes)
+        ingress_ns = beats * 1000 / self.accelerator_clock_mhz
+        return math.ceil(max(self.codebook_bytes / self.board_ddr_read_bytes_per_ns,
+                             ingress_ns) + self.codebook_extra_cycles * 1000 /
+                         self.accelerator_clock_mhz)
+
+    def pq_load_ns(self, n_docs: int) -> int:
+        """End-to-end SSD-to-DDR copy; includes the DDR write exactly once."""
+        bw = (self.ssd_to_ddr_bytes_per_ns if self.board_calibrated
+              else self.pcie_bytes_per_ns)
+        return self.ssd_command_ns + math.ceil((64 + self.entry_bytes() * n_docs) / bw)
+
+    def raw_load_ns(self, candidates: int) -> int:
+        bw = (self.ssd_to_ddr_bytes_per_ns if self.board_calibrated
+              else self.pcie_bytes_per_ns)
+        return self.ssd_command_ns + math.ceil(candidates * self.raw_vector_bytes / bw)
+
+    def rerank_ns(self, top_k: int, candidates: int) -> int:
+        return max(top_k, candidates) * self.cpu_ns_per_candidate
+
+    def return_ns(self, top_k: int) -> int:
+        return max(1, math.ceil(top_k * self.response_bytes_per_result /
+                               self.network_bytes_per_ns) + self.network_latency_ns)
+
     def __post_init__(self) -> None:
+        if (not math.isfinite(self.accelerator_clock_mhz)
+                or self.accelerator_clock_mhz <= 0):
+            raise ContractError("accelerator_clock_mhz must be finite and positive")
+        if self.codebook_beat_bytes <= 0 or self.codebook_extra_cycles < 0:
+            raise ContractError("invalid codebook beat width or extra cycles")
         if not isinstance(self.ddr_capacity_bytes, int) or isinstance(
                 self.ddr_capacity_bytes, bool) or self.ddr_capacity_bytes < 1:
             raise ContractError(
@@ -249,6 +288,7 @@ class QueryTiming:
     ddr_transfers: int
     reservations: tuple[Reservation, ...]
     ddr_evictions: int = 0
+    bram_evictions: int = 0
     fpga_tiles: int = 0
     raw_transfers: int = 0
     raw_evictions: int = 0
@@ -329,6 +369,33 @@ def _slo_weight(slo_ns: "int | None") -> float:
     return 0.75
 
 
+def scan_work(fpga, hw, n_docs, top_k):
+    """Return cycles and tile count without booking resources or mutating state."""
+    reuse = os.environ.get("OSD_TABLE_REUSE", "0") == "1"
+    reusable = float(os.environ.get("OSD_TABLE_REUSE_CYCLES", "0"))
+    if reuse and reusable <= 0:
+        raise ContractError("OSD_TABLE_REUSE requires positive OSD_TABLE_REUSE_CYCLES")
+    cycles, tiles, remaining = 0.0, 0, n_docs
+    while remaining > 0:
+        docs = min(remaining, TILE_MAX_DOCS)
+        value = fpga.predict_cycles(docs, top_k, codebook_resident=True)
+        if hw.board_calibrated:
+            feed = hw.board_pq_entry_bytes * docs / hw.board_ddr_read_bytes_per_ns
+            compute = fpga.scan_cycles_per_doc(docs) * docs
+            value += max(0, feed / fpga.clock_ns - compute)
+        if reuse and tiles:
+            if reusable >= value:
+                raise ContractError("reusable cycles exceed tile service cycles")
+            value -= reusable
+        cycles += value
+        remaining -= docs
+        tiles += 1
+    if not tiles:
+        cycles = fpga.predict_cycles(0, top_k, codebook_resident=True)
+        tiles = 1
+    return cycles, tiles
+
+
 class OSDTimingModel:
     """Per-OSD query timing simulator built on a shared ``DesEngine``."""
 
@@ -369,6 +436,7 @@ class OSDTimingModel:
         for cb in bram_codebooks:
             self._bram_codebooks[cb] = None
         self._queue_depth: int = 0
+        self._estimate_base_ns: dict[tuple, int] = {}
         self._last_query_end_ns: int = 0
         # Eviction policy (OSD_EVICT_POLICY): lru | keep_large | keep_small | lfu | freq_size
         self._evict_policy: str = os.environ.get("OSD_EVICT_POLICY", "lru")
@@ -428,7 +496,7 @@ class OSDTimingModel:
 
     def _pq_footprint(self, cid: int) -> int:
         """DDR bytes one cluster's PQ codes occupy (what the FPGA scans)."""
-        return self.hardware.entry_bytes() * max(0, self._cluster_vectors(cid))
+        return 64 + self.hardware.entry_bytes() * max(0, self._cluster_vectors(cid))
 
     def _raw_footprint(self, cid: int, rerank_per_cluster: int) -> int:
         """DDR bytes of the raw vectors needed to rerank this cluster's
@@ -436,6 +504,39 @@ class OSDTimingModel:
         each.  The candidates themselves are sparse inside the cluster, so this
         is far smaller than caching the whole cluster's raw vectors."""
         return self.hardware.raw_vector_bytes * max(0, int(rerank_per_cluster))
+
+    def estimate_service_ns(self, cluster_ids, top_k, codebook_id,
+                            rerank_per_cluster=0):
+        """Uncontended service at current cache state; no state/calendar mutation.
+
+        Does not include other requests' resource waits, prefetch, launch or
+        merge costs. Those cannot be inferred from cache state alone.
+        """
+        ids = tuple(dict.fromkeys(cluster_ids))
+        hw = self.hardware
+        predictor = self.fpga
+        # Counting wrappers must not count hypothetical dispatches as work.
+        if hasattr(predictor, 'svc_cycles'):
+            predictor = predictor.base
+        candidates = max(0, int(rerank_per_cluster))
+        # Only immutable work is memoized; cache misses below remain live.
+        key = (ids, top_k, candidates, os.environ.get('OSD_TABLE_REUSE'),
+               os.environ.get('OSD_TABLE_REUSE_CYCLES'))
+        if key not in self._estimate_base_ns:
+            cycles, _ = scan_work(predictor, hw,
+                                  sum(self._cluster_vectors(c) for c in ids), top_k)
+            self._estimate_base_ns[key] = (
+                math.ceil(cycles * predictor.clock_ns)
+                + (len(ids) * hw.raw_load_ns(candidates) if candidates else 0)
+                + hw.rerank_ns(top_k, len(ids) * candidates) + hw.return_ns(top_k))
+        cost = self._estimate_base_ns[key]
+        for cid in ids:
+            if cid not in self._pq_clusters:
+                cost += hw.pq_load_ns(self._cluster_vectors(cid))
+        if codebook_id not in self._bram_codebooks:
+            cost += (hw.codebook_duration_ns() if hw.board_calibrated else
+                     math.ceil(predictor.codebook_load_cycles * predictor.clock_ns))
+        return cost
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -601,10 +702,11 @@ class OSDTimingModel:
         codebook_key = codebook_id if codebook_id is not None else f"{tenant}:default"
         codebook_loaded_this_query = False
         codebook_load_ns = 0
+        bram_evictions = 0
         if codebook_key not in self._bram_codebooks:
             clock_ns = float(getattr(self.fpga, "clock_ns", 1.0))
             if hw.board_calibrated:
-                load_duration = int(hw.board_codebook_load_ns)
+                load_duration = hw.codebook_duration_ns()
             else:
                 load_cycles = float(getattr(self.fpga, "codebook_load_cycles", 0.0))
                 load_duration = int(math.ceil(load_cycles * clock_ns))
@@ -621,6 +723,7 @@ class OSDTimingModel:
             else:
                 if len(self._bram_codebooks) >= hw.bram_capacity_slots:
                     # evict the least-recently-used
+                    bram_evictions += 1
                     self._bram_codebooks.popitem(last=False)
                 self._bram_codebooks[codebook_key] = None
         else:
@@ -640,36 +743,7 @@ class OSDTimingModel:
                 for cid in cluster_ids_unique)
         else:
             n_docs = len(cluster_ids_unique) * hw.vectors_per_cluster
-        fpga_tiles = 0
-        fpga_cycles = 0.0
-        remaining = n_docs
-        _reuse_table = os.environ.get("OSD_TABLE_REUSE", "0") == "1"
-        while remaining > 0:
-            tile_docs = min(remaining, TILE_MAX_DOCS)
-            _compute_cyc = self.fpga.predict_cycles(
-                n_docs=tile_docs, top_k=top_k, codebook_resident=True)
-            if hw.board_calibrated:
-                # Memory-aware bound: the fixed pipeline base is paid whether or
-                # not the tile is DDR-feed-bound, so the max() applies to the
-                # steady-state term only: T = base + max(proc*N, feed*N).
-                _clk_ns = float(getattr(self.fpga, "clock_ns", 5.556))
-                _mem_ns = (hw.board_pq_entry_bytes * tile_docs) / hw.board_ddr_read_bytes_per_ns
-                _mem_cyc = _mem_ns / _clk_ns
-                _proc_cyc = float(self.fpga.scan_cycles_per_doc(tile_docs))
-                _compute_cyc = max(
-                    _compute_cyc,
-                    _compute_cyc - _proc_cyc * tile_docs + _mem_cyc)
-            if _reuse_table and fpga_tiles > 0:
-                # Query read + distance table are per (query, codebook), not
-                # per tile: only the first tile of a cluster pays them.
-                _compute_cyc = max(1.0, _compute_cyc - TABLE_BUILD_CYCLES)
-            fpga_cycles += _compute_cyc
-            remaining -= tile_docs
-            fpga_tiles += 1
-        if fpga_tiles == 0:  # empty scan still costs one pipeline setup
-            fpga_cycles = self.fpga.predict_cycles(
-                n_docs=0, top_k=top_k, codebook_resident=True)
-            fpga_tiles = 1
+        fpga_cycles, fpga_tiles = scan_work(self.fpga, hw, n_docs, top_k)
         fpga_ns = int(math.ceil(
             fpga_cycles * float(getattr(self.fpga, "clock_ns", 1.0))))
         _pipelined = (hw.board_calibrated and hw.board_pipeline_scan
@@ -763,9 +837,8 @@ class OSDTimingModel:
         if rerank_per_cluster > 0:
             raw_bytes = self._raw_footprint(cluster_ids_unique[0], rerank_per_cluster)
             for cid in cluster_ids_unique:
-                if cid in self._raw_clusters:
-                    self._raw_clusters.move_to_end(cid)
-                    continue
+                # Candidate identities differ between queries. A cluster ID
+                # alone cannot prove its new candidates are already cached.
                 cursor = _book(
                     self.engine, res.ssd_command, task_id, hw.ssd_command_ns,
                     cursor, booked=booked)
@@ -778,8 +851,6 @@ class OSDTimingModel:
                     self.engine, res.pcie, task_id, pcie_ns, cursor,
                     payload_bytes=raw_bytes, booked=booked)
                 # Same end-to-end rate as stage 1: the write is inside it.
-                self._raw_clusters[cid] = raw_bytes
-                self._raw_bytes += raw_bytes
                 raw_transfers += 1
             while (self._raw_bytes > hw.raw_cache_bytes
                    and len(self._raw_clusters) > len(protected)):
@@ -796,7 +867,7 @@ class OSDTimingModel:
         # Rerank scores every candidate the FPGA produced (r per probed
         # cluster), so the CPU cost scales with the candidate list, not top_k.
         n_rerank = max(top_k, len(cluster_ids_unique) * max(0, int(rerank_per_cluster)))
-        rerank_ns = n_rerank * hw.cpu_ns_per_candidate
+        rerank_ns = hw.rerank_ns(top_k, n_rerank)
         cursor = _book(
             self.engine, res.cpu, task_id, rerank_ns, cursor, booked=booked)
         stage_end["rerank"] = cursor
@@ -804,7 +875,7 @@ class OSDTimingModel:
         # --- Stage 5: network return ------------------------------------------
         response_bytes = top_k * hw.response_bytes_per_result
         net_ns = _ceil_div(response_bytes, hw.network_bytes_per_ns)
-        total_net_ns = net_ns + hw.network_latency_ns
+        total_net_ns = hw.return_ns(top_k)
         cursor = _book(
             self.engine, res.network, task_id, max(1, total_net_ns), cursor,
             payload_bytes=response_bytes, booked=booked)
@@ -824,6 +895,7 @@ class OSDTimingModel:
             ddr_transfers=ddr_transfer_count,
             reservations=tuple(booked),
             ddr_evictions=ddr_evictions,
+            bram_evictions=bram_evictions,
             fpga_tiles=fpga_tiles,
             raw_transfers=raw_transfers,
             raw_evictions=raw_evictions,

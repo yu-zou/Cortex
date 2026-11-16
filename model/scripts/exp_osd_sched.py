@@ -45,6 +45,7 @@ passed; ``fixture`` / ``dry-run`` use synthetic traces only.
 from __future__ import annotations
 
 import os
+import math
 import argparse
 import json
 import random
@@ -61,12 +62,8 @@ _PROJECT_ROOT_DEFAULT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT_DEFAULT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT_DEFAULT))
 
-from scripts.validate_model import (  # noqa: E402
-    DEFAULT_GATE_PATH,
-    ModelGateError,
-    ModelGateNotPassedError,
-    require_model_gate,
-)
+# Validation/HLS helpers are required only by calibrated/formal entry points.
+# Keep the simulation API importable without that optional toolchain closure.
 from strata_sim.contracts.schema import ClockKind, ContractError, ProfileRef  # noqa: E402
 from strata_sim.des import fpga  # noqa: E402
 from strata_sim.des.engine import DesEngine  # noqa: E402
@@ -77,6 +74,7 @@ from strata_sim.sched.osd_state_manager import OSDStateManager  # noqa: E402
 from strata_sim.sched.osd_timing import (  # noqa: E402
     OSDHardwareProfile,
     OSDTimingModel,
+    scan_work,
     QueryTiming,
     add_osd_resources,
 )
@@ -109,7 +107,7 @@ STATUS_BLOCKED = "blocked"
 STATUS_COMPLETE = "complete"
 STATUS_FIXTURE = "fixture"
 
-STRATEGIES = ("fifo", "spt", "edf", "drr", "multifactor", "batch", "lstf", "cache")
+STRATEGIES = ("fifo", "spt", "edf", "drr", "multifactor", "batch", "lstf", "cache", "bwc", "cbw")
 EXIT_OK = 0
 EXIT_CONFIG = 2
 EXIT_BLOCKED = 4
@@ -359,7 +357,7 @@ def generate_trace(
             query_id=f"q{q_index:05d}",
             tenant=tenant,
             arrival_ns=arrival_ns,
-            deadline_ns=arrival_ns + _slo_ns(arrival.tenant, deadline_ns, deadline_mode),
+            deadline_ns=arrival_ns + deadline_ns,
             cluster_ids=cluster_ids,
             top_k=top_k,
             codebook_id=codebook_id,
@@ -541,7 +539,8 @@ class OsdScheduler:
                 width=window_width, weights=self.weights,
                 cluster_sizes=cluster_sizes, adaptive=adaptive)
         else:
-            self._queue = QueryQueue(strategy=QueueStrategy(strategy))
+            self._queue = QueryQueue(strategy=QueueStrategy(strategy),
+                max_wait_ns=int(os.environ.get("OSD_MAX_WAIT_NS", "5000000")))
 
     def push(self, query: QueuedQuery) -> None:
         if self._window is not None:
@@ -569,7 +568,7 @@ class OsdScheduler:
         if self._window is not None:
             return self._window.peek_next(view)
         assert self._queue is not None
-        return self._queue.peek(view.now_ns)
+        return self._queue.peek(view.now_ns, view)
 
     @property
     def pending(self) -> int:
@@ -739,10 +738,34 @@ def run_simulation(
 
     def _view_for(osd_id: int, now_ns: int) -> OsdView:
         tm = timing_models[osd_id]
+        estimates = {}
+        savings = {}
+        bram = tm.bram_resident()
+        ddr = tm.ddr_resident()
+        queue = schedulers[osd_id]._queue
+        needs_service = strategy in ("spt", "cache", "lstf", "cbw")
+        needs_savings = strategy in ("bwc", "cbw")
+        if queue is not None and (needs_service or needs_savings):
+            for q in queue._pending.values():
+                if needs_service:
+                    estimates[q.query_id] = tm.estimate_service_ns(
+                        q.cluster_ids, q.nprobe, q.codebook_id, rerank_per_cluster)
+                if not needs_savings:
+                    continue
+                saved = (tm.hardware.codebook_duration_ns()
+                         if q.codebook_id in bram else 0)
+                for cid in q.cluster_ids:
+                    if cid in ddr:
+                        n = (cluster_sizes.get(cid, tm.hardware.vectors_per_cluster)
+                             if cluster_sizes else tm.hardware.vectors_per_cluster)
+                        saved += tm.hardware.pq_load_ns(int(n))
+                savings[q.query_id] = saved
         return OsdView(
             now_ns=now_ns,
-            bram_codebooks=tm.bram_resident(),
-            ddr_cached_clusters=tm.ddr_resident(),
+            bram_codebooks=bram,
+            ddr_cached_clusters=ddr,
+            service_estimates_ns=estimates if needs_service else None,
+            cache_savings_ns=savings,
             max_compute_ns=max(1, int(fpga_model.predict_ns(
                 n_docs=64 * 16, top_k=10, codebook_resident=True))),
         )
@@ -773,7 +796,7 @@ def run_simulation(
             _win_qs = scheduler.window_queries()
         except AttributeError:
             _win_qs = []
-        if not _win_qs:
+        if not _win_qs and timing_models[osd_id]._prefetch_enabled:
             # FIFO and the other queue strategies have no SchedulingWindow;
             # fall back to the single next query so staging still works.
             _nxt = scheduler.peek(view)
@@ -1134,6 +1157,8 @@ def compute_metrics(
 
     codebook_reloads = sum(1 for c in completed for t in c.timings if t.codebook_loaded)
     ddr_transfers = sum(t.ddr_transfers for c in completed for t in c.timings)
+    ddr_evictions = sum(t.ddr_evictions for c in completed for t in c.timings)
+    bram_evictions = sum(t.bram_evictions for c in completed for t in c.timings)
 
     per_tenant: dict[str, dict[str, Any]] = {}
     for tenant in sorted(per_tenant_counts):
@@ -1171,6 +1196,8 @@ def compute_metrics(
         "jain_demand_normalized": jain_demand_normalized,
         "codebook_reloads": codebook_reloads,
         "ddr_transfers": ddr_transfers,
+        "ddr_evictions": ddr_evictions,
+        "bram_evictions": bram_evictions,
         "per_tenant": per_tenant,
         "claims": dict(claims),
     }
@@ -1327,6 +1354,10 @@ def run_formal(
     cluster_sizes: Mapping[int, int] | None = None,
 ) -> dict[str, Any]:
     """Formal run: refuses with ``blocked`` if the model gate has not passed."""
+    from scripts.validate_model import (
+        ModelGateError, ModelGateNotPassedError, require_model_gate,
+    )
+
     root = Path(project_root) if project_root is not None else _PROJECT_ROOT_DEFAULT
     try:
         require_model_gate(project_root=root)
@@ -1511,6 +1542,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         except OsdSchedError as error:
             print(f"error: {error}", file=sys.stderr)
             return EXIT_CONFIG
+
+    # Legacy execution modes retain the real validation helpers and gate;
+    # missing dependencies still fail closed, never via a substitute stub.
+    from scripts.validate_model import ModelGateError, ModelGateNotPassedError
 
     try:
         if args.mode == "dry-run":

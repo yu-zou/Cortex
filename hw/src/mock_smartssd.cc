@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace cortex {
@@ -13,14 +15,25 @@ namespace cortex {
 // Offset 0x0C~0x3F: reserved[13] (52B)
 static constexpr size_t kHeaderSize = 64;
 
+static uint32_t read_le32(const uint8_t* p) {
+    return uint32_t(p[0]) | (uint32_t(p[1]) << 8) |
+           (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+}
+
+static bool checked_product(uint64_t a, uint64_t b, uint64_t& out) {
+    if (b && a > std::numeric_limits<uint64_t>::max() / b) return false;
+    out = a * b;
+    return true;
+}
+
 int MockSmartSSD::parse_header(const uint8_t* data, uint64_t size,
                                 uint32_t& M, uint32_t& DIM, uint32_t& N) {
     if (size < kHeaderSize) return -EINVAL;
 
     // Little-endian read
-    M   = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
-    DIM = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
-    N   = data[8] | (data[9] << 8) | (data[10] << 16) | (data[11] << 24);
+    M   = read_le32(data);
+    DIM = read_le32(data + 4);
+    N   = read_le32(data + 8);
 
     if (M == 0 || DIM == 0 || DIM % M != 0) return -EINVAL;
     return 0;
@@ -45,7 +58,8 @@ int MockSmartSSD::load_cluster(
     const void* object_data, uint64_t object_size,
     const void*, uint64_t, uint32_t)
 {
-    if (!object_data || object_size < kHeaderSize) {
+    if (!object_data || object_size < kHeaderSize ||
+        object_size > std::numeric_limits<size_t>::max()) {
         return -EINVAL;
     }
 
@@ -54,17 +68,32 @@ int MockSmartSSD::load_cluster(
     // Auto-detect format: try IVF first, fallback to HNSW
     uint32_t M, DIM, N;
     int rc = parse_header(base, object_size, M, DIM, N);
+    // A tagged CPU object must never fall through to the untagged HNSW parser.
+    if (rc != 0 && read_le32(base + 12) == 0x31515043) return -EINVAL;
     if (rc == 0 && DIM % M == 0) {
         // IVF format detected
         uint32_t Ds = DIM / M;
-        const uint32_t entry_bytes = M + 16;
-        const uint64_t pq_bytes = static_cast<uint64_t>(N) * entry_bytes;
-        const uint32_t KS_dynamic = 16;
-        const uint64_t cb_bytes = static_cast<uint64_t>(M) * KS_dynamic * Ds * 4;
+        const bool compact = read_le32(base + 12) == 0x31515043;
+        const uint32_t version = compact ? read_le32(base + 16) : 0;
+        const uint32_t KS_dynamic = compact ? read_le32(base + 20) : 16;
+        if (compact && ((version != 1 && version != 2) ||
+                          (KS_dynamic != 16 && KS_dynamic != 256))) return -EINVAL;
+        if (version == 2 && read_le32(base + 24) != 1) return -EINVAL;
+        for (size_t off = version == 2 ? 28 : (compact ? 24 : 12);
+             off < kHeaderSize; ++off)
+            if (base[off] != 0) return -EINVAL;
 
-        if (object_size < kHeaderSize + cb_bytes + pq_bytes) {
-            return -EINVAL;
-        }
+        const uint64_t entry_bytes = uint64_t(M) + 16;
+        const uint64_t centroid_bytes = version == 2 ? uint64_t(DIM) * 4 : 0;
+        uint64_t pq_bytes, cb_bytes;
+        if (!checked_product(N, entry_bytes, pq_bytes) ||
+            !checked_product(DIM, uint64_t(KS_dynamic) * 4, cb_bytes) ||
+            cb_bytes > object_size - kHeaderSize ||
+            centroid_bytes > object_size - kHeaderSize - cb_bytes ||
+            pq_bytes != object_size - kHeaderSize - cb_bytes - centroid_bytes ||
+            cb_bytes / 4 > std::vector<float>().max_size() ||
+            uint64_t(N) * M > std::vector<uint8_t>().max_size() ||
+            N > std::vector<PQEntry>().max_size()) return -EINVAL;
 
         ClusterData data;
         data.M = M;
@@ -72,16 +101,32 @@ int MockSmartSSD::load_cluster(
         data.Ds = Ds;
         data.num_vectors = N;
         data.ksub = KS_dynamic;
+        data.compact_version = version;
 
         data.codebook.resize(static_cast<size_t>(M) * KS_dynamic * Ds);
-        std::memcpy(data.codebook.data(), base + kHeaderSize, cb_bytes);
+        static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559,
+                      "CPU compact requires IEEE float32");
+        for (size_t i = 0; i < data.codebook.size(); ++i) {
+            uint32_t bits = read_le32(base + kHeaderSize + i * 4);
+            std::memcpy(&data.codebook[i], &bits, 4);
+            if (!std::isfinite(data.codebook[i])) return -EINVAL;
+        }
+
+        data.coarse_centroid.resize(centroid_bytes / 4);
+        for (size_t i = 0; i < data.coarse_centroid.size(); ++i) {
+            uint32_t bits = read_le32(base + kHeaderSize + cb_bytes + i * 4);
+            std::memcpy(&data.coarse_centroid[i], &bits, 4);
+            if (!std::isfinite(data.coarse_centroid[i])) return -EINVAL;
+        }
 
         data.codes_flat.resize(static_cast<size_t>(N) * M);
         data.entries.resize(N);
 
-        const uint8_t* pq_base = base + kHeaderSize + cb_bytes;
+        const uint8_t* pq_base = base + kHeaderSize + cb_bytes + centroid_bytes;
         for (uint32_t i = 0; i < N; ++i) {
             const uint8_t* entry = pq_base + static_cast<uint64_t>(i) * entry_bytes;
+            for (uint32_t m = 0; m < M; ++m)
+                if (entry[m] >= KS_dynamic) return -EINVAL;
             std::memcpy(data.codes_flat.data() + static_cast<size_t>(i) * M, entry, M);
 
             uint64_t doc_addr = 0;
@@ -92,7 +137,8 @@ int MockSmartSSD::load_cluster(
             uint64_t doc_len_raw = 0;
             for (int b = 0; b < 8; ++b)
                 doc_len_raw |= static_cast<uint64_t>(entry[M + 8 + b]) << (b * 8);
-            data.entries[i].doc_length = static_cast<uint32_t>(doc_len_raw & 0xFFFFFFFFULL);
+            if (doc_len_raw > UINT32_MAX) return -EINVAL;
+            data.entries[i].doc_length = static_cast<uint32_t>(doc_len_raw);
         }
 
         std::lock_guard<std::mutex> lk(mutex_);
@@ -175,14 +221,43 @@ SearchResult MockSmartSSD::search_ivfpq(
     const float* query_vec, uint32_t query_dim,
     uint32_t top_k, MetricType metric)
 {
-    const uint32_t M  = cd.M;
+    const size_t M  = cd.M;
     const uint32_t ksub = cd.ksub;
     const uint32_t Ds = cd.Ds;
     const uint32_t N  = cd.num_vectors;
 
-    if (query_dim < M * Ds) {
+    if (!query_vec || query_dim != cd.DIM ||
+        (metric != MetricType::L2 && metric != MetricType::InnerProduct)) {
         SearchResult r; r.status = -EINVAL; return r;
     }
+    if (cd.compact_version == 1 && metric != MetricType::L2) {
+        SearchResult r; r.status = -ENOTSUP; return r;
+    }
+    for (uint32_t j = 0; j < query_dim; ++j) {
+        if (!std::isfinite(query_vec[j])) {
+            SearchResult r; r.status = -EINVAL; return r;
+        }
+    }
+
+    float coarse_score = 0.0f;
+    std::vector<float> residual_query;
+    if (cd.compact_version == 2) {
+        if (metric == MetricType::L2) residual_query.resize(query_dim);
+        for (uint32_t j = 0; j < query_dim; ++j) {
+            if (metric == MetricType::L2) {
+                residual_query[j] = query_vec[j] - cd.coarse_centroid[j];
+                if (!std::isfinite(residual_query[j])) {
+                    SearchResult r; r.status = -ERANGE; return r;
+                }
+            } else {
+                coarse_score -= query_vec[j] * cd.coarse_centroid[j];
+                if (!std::isfinite(coarse_score)) {
+                    SearchResult r; r.status = -ERANGE; return r;
+                }
+            }
+        }
+    }
+    const float* l2_query = residual_query.empty() ? query_vec : residual_query.data();
 
     // Precompute distance lookup table: M × ksub
     std::vector<float> dist_table(static_cast<size_t>(M) * ksub);
@@ -192,9 +267,12 @@ SearchResult MockSmartSSD::search_ivfpq(
             for (uint32_t k = 0; k < ksub; ++k) {
                 float d = 0.0f;
                 for (uint32_t j = 0; j < Ds; ++j) {
-                    float diff = query_vec[m * Ds + j]
+                    float diff = l2_query[m * Ds + j]
                                - cd.codebook[(m * ksub + k) * Ds + j];
                     d += diff * diff;
+                }
+                if (!std::isfinite(d)) {
+                    SearchResult r; r.status = -ERANGE; return r;
                 }
                 dist_table[m * ksub + k] = d;
             }
@@ -207,6 +285,9 @@ SearchResult MockSmartSSD::search_ivfpq(
                     dot += query_vec[m * Ds + j]
                          * cd.codebook[(m * ksub + k) * Ds + j];
                 }
+                if (!std::isfinite(dot)) {
+                    SearchResult r; r.status = -ERANGE; return r;
+                }
                 dist_table[m * ksub + k] = -dot;
             }
         }
@@ -215,12 +296,15 @@ SearchResult MockSmartSSD::search_ivfpq(
     // ADC: accumulate distance via table lookup
     std::vector<std::pair<float, uint32_t>> scores(N);
     for (uint32_t i = 0; i < N; ++i) {
-        float adc = 0.0f;
+        float adc = coarse_score;
         const uint8_t* codes = cd.codes_flat.data() + static_cast<size_t>(i) * M;
         for (uint32_t m = 0; m < M; ++m) {
             adc += dist_table[m * ksub + codes[m]];
         }
         scores[i] = {adc, i};
+        if (!std::isfinite(adc)) {
+            SearchResult r; r.status = -ERANGE; return r;
+        }
     }
 
     const uint32_t actual_k = std::min(top_k, N);

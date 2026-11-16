@@ -12,13 +12,26 @@ namespace cortex {
 // Supports two search modes:
 //   Mode 0 (IVFPQ): IVF cluster format
 //     Offset 0x00: 64B Header {M, DIM, N, reserved[13]}
-//     Offset 0x40: Codebook: M * KS * Ds * 4 bytes (KS=16 for test fixtures)
-//     Offset 0x40+CB: PQ entries: N * (M + 16) bytes
+//     Legacy: all 13 reserved words zero, implicit KS=16 only.
+//     CPU compact v1: LE u32 at +12 = 0x31515043 ("CPQ1"),
+//       +16 = version 1, +20 = explicit KS (16 or 256), +24..63 zero.
+//       v1 supports raw ADC L2 only; no residual/coarse/IP semantics.
+//     CPU compact v2: same tag, +16 = 2, +20 = KS (16 or 256),
+//       +24 = flags (exactly 1: residual-trained), +28..63 zero.
+//     Offset 0x40: LE IEEE float32 codebook [M][KS][DIM/M].
+//     v2 only: codebook followed by DIM LE float32 coarse centroid values.
+//     Then PQ entries: N * (M + 16) bytes.
+//     v2 caller supplies full raw q: L2 uses q-centroid; IP returns
+//       -dot(q,centroid)-sum(dot(q_m,PQcode_m)), lower is better.
 //   Mode 1 (HNSW): HNSW graph format
 //     Offset 0x00: 16B Header {num_nodes, entry_point, dim, max_degree}
 //     Offset 0x10+: Node data, each node: dim floats + num_nbrs uint32 + max_degree uint32 (adjacency)
 //
 // PQ entry format (IVFPQ): M bytes PQ codes + 8B doc_addr + 8B doc_length
+// Exact size: 64 + KS*DIM*4 + (v2 ? DIM*4 : 0) + N*(M+16).
+// No padding/trailing bytes; no unversioned residual inference.
+// doc_length must fit uint32 (host result). CPU M96 stride is 112B,
+// NOT the FPGA 128B stride/beat order. Never infer KS from object size.
 // Search result format: dist(32b) + doc_addr(64b) + doc_length(32b) = 128 bit
 
 class MockSmartSSD : public SmartSSDDevice {
@@ -43,9 +56,6 @@ public:
     void evict_cluster(uint32_t cluster_id) override;
 
 private:
-    // KS=16 used for test fixtures (matches metadata.json: ksub=16).
-    // FPGA synthesis path uses KS=256 (acc_top.h); mock validates algorithm
-    // correctness with smaller codebook for faster iteration.
 
     struct PQEntry {
         uint64_t doc_addr;
@@ -59,6 +69,8 @@ private:
         uint32_t Ds;          // DIM / M, dimension per sub-vector
         uint32_t ksub;        // centroids per sub-quantizer in codebook (FPGA hardcoded=256)
         uint32_t num_vectors;
+        uint32_t compact_version; // 0 legacy, 1 raw L2, 2 residual L2/IP
+        std::vector<float> coarse_centroid; // DIM floats for v2 only
         std::vector<float>  codebook;     // M * ksub * Ds floats
         std::vector<uint8_t> codes_flat;  // N * M bytes, all PQ codes concatenated
         std::vector<PQEntry> entries;     // N entries, each with doc_addr + doc_length

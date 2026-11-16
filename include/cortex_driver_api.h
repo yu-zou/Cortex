@@ -8,7 +8,9 @@ extern "C" {
 #endif
 
 /* ABI version — loader checks this first */
-#define CORTEX_API_VERSION ((uint32_t)1)
+/* Version 1 was ambiguous: Ceph shipped a seven-argument/vector-ID variant.
+ * Version 2 requires the eight-argument/document-address contract below. */
+#define CORTEX_API_VERSION ((uint32_t)2)
 
 /* Maximum top-K results — fixed-size array, no heap allocation across ABI */
 #define CORTEX_TOPK_MAX 500
@@ -27,14 +29,14 @@ uint32_t cortex_api_version(void);
 int cortex_driver_init(const char* config_json);
 void cortex_driver_shutdown(void);
 
-/* Top-K result entry — matches FPGA 128-bit output format:
+/* Host ABI entry (24 bytes on the supported 64-bit ABI), NOT packed FPGA data:
  *   dist(FP32, 32b) + doc_addr(64b) + doc_length(32b)
- * Stage 5 result push */
+ * Stage 5 result push is converted to this host layout by the driver. */
 struct cortex_topk_entry {
     float distance;
     uint64_t doc_addr;     /* document start address in object storage */
     uint32_t doc_length;   /* document byte length */
-    uint32_t _pad;         /* padding to 128-bit */
+    uint32_t _pad;         /* reserved; driver sets to zero */
 };
 
 /* Semantic read result — fixed-size, no pointers across ABI */
@@ -55,7 +57,7 @@ struct cortex_read_result {
  * @query_dim:    Dimensionality of query vector
  * @top_k:        Number of results to return (max CORTEX_TOPK_MAX)
  * @metric_type:  CORTEX_METRIC_L2 or CORTEX_METRIC_IP
- * @search_mode:  CORTEX_MODE_IVFPQ or CORTEX_MODE_HNSW
+ * @search_mode:  CORTEX_MODE_IVFPQ (the currently supported mode)
  */
 struct cortex_read_result cortex_semantic_read(
     uint32_t cluster_id,
