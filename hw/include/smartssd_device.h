@@ -5,10 +5,13 @@
 namespace cortex {
 
 enum class MetricType : uint32_t { L2 = 0, InnerProduct = 1 };
+enum class SearchMode : uint32_t { IVFPQ = 0, HNSW = 1 };
 
+/* Matches FPGA 128-bit result: dist(32b) + doc_addr(64b) + doc_length(32b) */
 struct TopKEntry {
-    uint64_t vector_id;
     float distance;
+    uint64_t doc_addr;
+    uint32_t doc_length;
 };
 
 struct SearchResult {
@@ -32,12 +35,12 @@ public:
         const void* pq_payload, uint64_t payload_size,
         uint32_t vector_count) = 0;
     
-    // Run PQ ADC search on a loaded cluster
+    // Run vector search on a loaded cluster/graph
     virtual SearchResult search(
         uint32_t cluster_id,
         const void* object_data, uint64_t object_size,
         const float* query_vec, uint32_t query_dim,
-        uint32_t top_k, MetricType metric) = 0;
+        uint32_t top_k, MetricType metric, SearchMode mode) = 0;
     
     // Check if cluster data is loaded
     virtual bool is_cluster_loaded(uint32_t cluster_id) const = 0;

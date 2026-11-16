@@ -24,10 +24,12 @@ void cortex_driver_shutdown(void) {
 
 struct cortex_read_result cortex_semantic_read(
     uint32_t cluster_id, const void* object_data, uint64_t object_size,
-    const float* query_vec, uint32_t query_dim, uint32_t top_k, uint32_t metric_type)
+    const float* query_vec, uint32_t query_dim, uint32_t top_k,
+    uint32_t metric_type, uint32_t search_mode)
 {
     return cortex::get_driver().semantic_read(
-        cluster_id, object_data, object_size, query_vec, query_dim, top_k, metric_type);
+        cluster_id, object_data, object_size, query_vec, query_dim, top_k,
+        metric_type, search_mode);
 }
 
 int cortex_semantic_write(
